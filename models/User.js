@@ -8,6 +8,19 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   walletBalance: { type: Number, default: 0 },
   isAdmin: { type: Boolean, default: false },
+
+  // Hashed 4-digit PIN required to authorize transfers, withdrawals, and
+  // airtime-to-cash requests. Null until the user sets one.
+  transactionPin: { type: String, default: null },
+
+  // Where withdrawals get paid out to. Set once via Settings before a
+  // withdrawal can be requested.
+  bankAccount: {
+    bankName: { type: String, default: null },
+    accountNumber: { type: String, default: null },
+    accountName: { type: String, default: null }
+  },
+
   createdAt: { type: Date, default: Date.now }
 });
 

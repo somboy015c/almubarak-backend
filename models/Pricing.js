@@ -7,7 +7,9 @@ const pricingSchema = new mongoose.Schema({
   data: { markupPercent: { type: Number, default: 2 } },
   electricity: { markupPercent: { type: Number, default: 1.5 } },
   cable: { markupPercent: { type: Number, default: 1.5 } },
-  exam: { flatFee: { type: Number, default: 100 } }
+  exam: { flatFee: { type: Number, default: 100 } },
+  airtimeToCash: { ratePercent: { type: Number, default: 80 } },
+  withdrawal: { minAmount: { type: Number, default: 500 } }
 });
 
 const Pricing = mongoose.model('Pricing', pricingSchema);
