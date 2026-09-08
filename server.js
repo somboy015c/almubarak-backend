@@ -9,6 +9,10 @@ const walletRoutes = require('./routes/wallet');
 const serviceRoutes = require('./routes/services');
 const transactionRoutes = require('./routes/transactions');
 const adminRoutes = require('./routes/admin');
+const securityRoutes = require('./routes/security');
+const transferRoutes = require('./routes/transfer');
+const withdrawalRoutes = require('./routes/withdrawal');
+const airtimeToCashRoutes = require('./routes/airtime-to-cash');
 
 const app = express();
 
@@ -39,6 +43,10 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/security', securityRoutes);
+app.use('/api/transfer', transferRoutes);
+app.use('/api/withdrawal', withdrawalRoutes);
+app.use('/api/airtime-to-cash', airtimeToCashRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', mode: process.env.PROVIDER_MODE || 'mock' });
