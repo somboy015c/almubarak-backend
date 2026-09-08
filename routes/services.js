@@ -32,6 +32,15 @@ router.get('/exam/plans', requireAuth, async (req, res) => {
   res.json({ plans: priced });
 });
 
+// Publicly-relevant limits/rates for display in forms (not sensitive, just current settings)
+router.get('/limits', requireAuth, async (req, res) => {
+  const pricing = await getOrCreatePricing();
+  res.json({
+    airtimeToCashRatePercent: pricing.airtimeToCash.ratePercent,
+    minWithdrawal: pricing.withdrawal.minAmount
+  });
+});
+
 // ---- Shared purchase flow ----
 
 async function recordTransaction({ userId, type, description, amount, status, meta, request_id }) {
