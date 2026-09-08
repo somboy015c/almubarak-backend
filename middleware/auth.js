@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 
 async function requireAuth(req, res, next) {
@@ -29,4 +30,22 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireAdmin };
+// Guards any endpoint that moves money (transfer, withdrawal, airtime-to-cash).
+// Requires the user to already have a PIN set, and the request body to
+// include the correct `pin`.
+async function requirePin(req, res, next) {
+  if (!req.user.transactionPin) {
+    return res.status(400).json({ error: 'Please set a transaction PIN in Settings first.' });
+  }
+  const { pin } = req.body;
+  if (!pin) {
+    return res.status(400).json({ error: 'Your transaction PIN is required.' });
+  }
+  const match = await bcrypt.compare(String(pin), req.user.transactionPin);
+  if (!match) {
+    return res.status(401).json({ error: 'Incorrect transaction PIN.' });
+  }
+  next();
+}
+
+module.exports = { requireAuth, requireAdmin, requirePin };
