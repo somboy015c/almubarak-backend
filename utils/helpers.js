@@ -13,7 +13,8 @@ function applyMarkup(providerCost, markupPercent = 0) {
 function publicUser(user) {
   if (!user) return null;
   const plain = typeof user.toObject === 'function' ? user.toObject() : user;
-  const { password, _id, __v, ...rest } = plain;
+  const { password, transactionPin, _id, __v, ...rest } = plain;
+  rest.hasPin = !!transactionPin;
   return rest;
 }
 
