@@ -17,8 +17,12 @@ const userSchema = new mongoose.Schema({
   // withdrawal can be requested.
   bankAccount: {
     bankName: { type: String, default: null },
+    bankCode: { type: String, default: null },
     accountNumber: { type: String, default: null },
-    accountName: { type: String, default: null }
+    accountName: { type: String, default: null },
+    // Paystack's saved "transfer recipient" id, created once and reused
+    // for every future withdrawal so we don't recreate it each time.
+    recipientCode: { type: String, default: null }
   },
 
   createdAt: { type: Date, default: Date.now }
