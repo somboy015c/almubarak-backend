@@ -63,7 +63,19 @@ router.post('/users/:id/wallet-adjust', async (req, res) => {
 // ---- Withdrawals ----
 router.get('/withdrawals', async (req, res) => {
   const withdrawals = await Withdrawal.find().sort({ createdAt: -1 });
-  res.json({ withdrawals });
+  const userIds = [...new Set(withdrawals.map((w) => w.userId))];
+  const users = await User.find({ id: { $in: userIds } });
+  const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
+
+  const enriched = withdrawals.map((w) => {
+    const obj = w.toObject();
+    const u = userMap[w.userId];
+    obj.userName = u ? u.fullName : 'Unknown user';
+    obj.userEmail = u ? u.email : '';
+    return obj;
+  });
+
+  res.json({ withdrawals: enriched });
 });
 
 router.post('/withdrawals/:id/approve', async (req, res) => {
@@ -108,7 +120,19 @@ router.post('/withdrawals/:id/reject', async (req, res) => {
 // ---- Airtime to cash ----
 router.get('/airtime-to-cash', async (req, res) => {
   const requests = await AirtimeToCash.find().sort({ createdAt: -1 });
-  res.json({ requests });
+  const userIds = [...new Set(requests.map((r) => r.userId))];
+  const users = await User.find({ id: { $in: userIds } });
+  const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
+
+  const enriched = requests.map((r) => {
+    const obj = r.toObject();
+    const u = userMap[r.userId];
+    obj.userName = u ? u.fullName : 'Unknown user';
+    obj.userEmail = u ? u.email : '';
+    return obj;
+  });
+
+  res.json({ requests: enriched });
 });
 
 router.post('/airtime-to-cash/:id/approve', async (req, res) => {

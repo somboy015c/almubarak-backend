@@ -6,6 +6,7 @@ const Withdrawal = require('../models/Withdrawal');
 const { getOrCreatePricing } = require('../models/Pricing');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { generateRef, publicUser } = require('../utils/helpers');
+const paystack = require('../services/paystack');
 
 const router = express.Router();
 
@@ -28,7 +29,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   }
 
   // Debit immediately so the money is set aside; refunded automatically if
-  // an admin rejects the request during manual payout verification.
+  // the payout fails or an admin rejects it.
   user.walletBalance = Number(user.walletBalance) - numericAmount;
   await user.save();
 
@@ -43,21 +44,81 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
     reference
   });
 
-  await Withdrawal.create({
+  const withdrawal = await Withdrawal.create({
     id: uuidv4(),
     userId: user.id,
     amount: numericAmount,
     bankName: user.bankAccount.bankName,
+    bankCode: user.bankAccount.bankCode,
     accountNumber: user.bankAccount.accountNumber,
     accountName: user.bankAccount.accountName,
     status: 'pending',
     transactionId: transaction.id
   });
 
-  res.json({
-    message: 'Withdrawal request submitted. It will be paid out once reviewed.',
-    user: publicUser(user)
-  });
+  // ---- Attempt automatic payout via Paystack Transfers ----
+  try {
+    // Reuse a saved recipient code if we made one before, otherwise create it now.
+    let recipientCode = user.bankAccount.recipientCode;
+    if (!recipientCode) {
+      const recipientResult = await paystack.createTransferRecipient({
+        name: user.bankAccount.accountName,
+        accountNumber: user.bankAccount.accountNumber,
+        bankCode: user.bankAccount.bankCode
+      });
+      if (!recipientResult.ok) {
+        throw new Error(recipientResult.message || 'Could not register this bank account for payout.');
+      }
+      recipientCode = recipientResult.recipientCode;
+      user.bankAccount.recipientCode = recipientCode;
+      await user.save();
+    }
+
+    const transferResult = await paystack.initiateTransfer({
+      amount: numericAmount,
+      recipientCode,
+      reason: `Almubarak withdrawal ${reference}`
+    });
+
+    if (!transferResult.ok) {
+      throw new Error(transferResult.message || 'Payout could not be sent.');
+    }
+
+    withdrawal.providerRef = transferResult.providerRef;
+
+    if (transferResult.status === 'success') {
+      withdrawal.status = 'success';
+      withdrawal.adminNote = 'Paid automatically via Paystack';
+      await withdrawal.save();
+      transaction.status = 'success';
+      await transaction.save();
+      return res.json({
+        message: 'Withdrawal successful — funds are on the way to your bank account.',
+        user: publicUser(user)
+      });
+    }
+
+    // Paystack sometimes holds transfers as 'pending' until approved in
+    // the dashboard (e.g. OTP-protected accounts) — leave it queued so
+    // either the automatic flow completes later or an admin can step in.
+    await withdrawal.save();
+    return res.json({
+      message: 'Withdrawal submitted and is being processed. You will be credited or notified shortly.',
+      user: publicUser(user)
+    });
+  } catch (err) {
+    // Automatic payout failed — refund the wallet and let an admin see it.
+    user.walletBalance = Number(user.walletBalance) + numericAmount;
+    await user.save();
+
+    withdrawal.status = 'failed';
+    withdrawal.adminNote = err.message;
+    await withdrawal.save();
+    transaction.status = 'failed';
+    await transaction.save();
+
+    return res.status(502).json({ error: err.message || 'Withdrawal could not be processed. You have not been charged.' });
+  }
 });
 
 module.exports = router;

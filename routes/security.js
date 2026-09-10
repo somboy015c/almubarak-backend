@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { publicUser } = require('../utils/helpers');
+const paystack = require('../services/paystack');
 
 const router = express.Router();
 
@@ -11,6 +12,23 @@ router.get('/status', requireAuth, (req, res) => {
     hasPin: !!req.user.transactionPin,
     hasBankAccount: !!(req.user.bankAccount && req.user.bankAccount.accountNumber)
   });
+});
+
+router.get('/banks', requireAuth, async (req, res) => {
+  const banks = await paystack.listBanks();
+  res.json({ banks });
+});
+
+router.post('/resolve-account', requireAuth, async (req, res) => {
+  const { accountNumber, bankCode } = req.body;
+  if (!accountNumber || !bankCode) {
+    return res.status(400).json({ error: 'Account number and bank are required.' });
+  }
+  const result = await paystack.resolveAccount({ accountNumber, bankCode });
+  if (!result.ok) {
+    return res.status(422).json({ error: result.message || 'Could not verify that account number.' });
+  }
+  res.json({ accountName: result.accountName });
 });
 
 // Set a PIN for the first time, or change an existing one.
@@ -52,13 +70,15 @@ router.post('/pin', requireAuth, async (req, res) => {
 // Requires the transaction PIN so a hijacked session can't quietly
 // redirect future payouts.
 router.put('/bank-account', requireAuth, requirePin, async (req, res) => {
-  const { bankName, accountNumber, accountName } = req.body;
-  if (!bankName || !accountNumber || !accountName) {
-    return res.status(400).json({ error: 'Bank name, account number and account name are all required.' });
+  const { bankName, bankCode, accountNumber, accountName } = req.body;
+  if (!bankName || !bankCode || !accountNumber || !accountName) {
+    return res.status(400).json({ error: 'Bank, account number and account name are all required.' });
   }
 
   const user = await User.findOne({ id: req.user.id });
-  user.bankAccount = { bankName, accountNumber, accountName };
+  // Reset the saved Paystack recipient whenever the account details change,
+  // so the next withdrawal registers a fresh recipient for the new details.
+  user.bankAccount = { bankName, bankCode, accountNumber, accountName, recipientCode: null };
   await user.save();
 
   res.json({ message: 'Withdrawal bank account saved.', user: publicUser(user) });

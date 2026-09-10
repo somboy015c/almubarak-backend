@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const User = require('../models/User');
 const Funding = require('../models/Funding');
+const Transaction = require('../models/Transaction');
 const { requireAuth } = require('../middleware/auth');
 const { publicUser } = require('../utils/helpers');
 const paystack = require('../services/paystack');
@@ -60,6 +61,16 @@ router.post('/fund/verify', requireAuth, async (req, res) => {
   const user = await User.findOne({ id: req.user.id });
   user.walletBalance = Number(user.walletBalance) + Number(funding.amount);
   await user.save();
+
+  await Transaction.create({
+    id: uuidv4(),
+    userId: user.id,
+    type: 'wallet-funding',
+    description: 'Wallet funding',
+    amount: Number(funding.amount),
+    status: 'success',
+    reference: funding.reference
+  });
 
   res.json({ message: 'Wallet funded successfully.', user: publicUser(user) });
 });
