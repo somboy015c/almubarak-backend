@@ -67,7 +67,7 @@ const PORT = process.env.PORT || 5000;
 connectDB()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`Almubarak VTU API running on port ${PORT} (${process.env.PROVIDER_MODE || 'mock'} mode)`);
+      console.log(`Elmubarak VTU API running on port ${PORT} (${process.env.PROVIDER_MODE || 'mock'} mode)`);
     });
   })
   .catch((err) => {
