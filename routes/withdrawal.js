@@ -77,7 +77,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
     const transferResult = await paystack.initiateTransfer({
       amount: numericAmount,
       recipientCode,
-      reason: `Almubarak withdrawal ${reference}`
+      reason: `Elmubarak withdrawal ${reference}`
     });
 
     if (!transferResult.ok) {

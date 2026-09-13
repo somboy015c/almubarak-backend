@@ -25,7 +25,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   });
 
   if (!recipientUser) {
-    return res.status(404).json({ error: 'No Almubarak account found with that email or phone number.' });
+    return res.status(404).json({ error: 'No Elmubarak account found with that email or phone number.' });
   }
   if (recipientUser.id === req.user.id) {
     return res.status(400).json({ error: "You can't transfer to your own account." });
