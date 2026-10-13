@@ -7,6 +7,7 @@ const AirtimeToCash = require('../models/AirtimeToCash');
 const { getOrCreatePricing, Pricing } = require('../models/Pricing');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { publicUser } = require('../utils/helpers');
+const vtpass = require('../services/vtpass');
 
 const router = express.Router();
 
@@ -22,6 +23,24 @@ router.get('/stats', async (req, res) => {
     totalTransactions: transactions.length,
     totalRevenue: successful.reduce((sum, t) => sum + Number(t.amount), 0),
     totalWalletFloat: users.reduce((sum, u) => sum + Number(u.walletBalance), 0)
+  });
+});
+
+// Live VTpass wallet balance (the money that actually pays for airtime/data/etc.)
+router.get('/provider-balance', async (req, res) => {
+  const result = await vtpass.getBalance();
+  const threshold = Number(process.env.VTPASS_LOW_BALANCE_ALERT || 10000);
+  if (!result.ok) {
+    return res.status(502).json({ error: result.message || 'Could not fetch the VTpass balance.' });
+  }
+  res.json({
+    provider: 'VTpass',
+    balance: result.balance,
+    mock: !!result.mock,
+    threshold,
+    low: result.balance < threshold,
+    dashboardUrl: (process.env.VTPASS_BASE_URL || '').includes('sandbox') ? 'https://sandbox.vtpass.com/' : 'https://vtpass.com/',
+    checkedAt: new Date().toISOString()
   });
 });
 

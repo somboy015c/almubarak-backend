@@ -1,6 +1,6 @@
 // Automatic airtime-to-cash verification.
 //
-// Unlike VTpass (buying airtime) or Paystack (payments/transfers), there
+// Unlike VTpass (buying airtime) or Flutterwave (payments/transfers), there
 // isn't one standard, universally-used API for verifying an *incoming*
 // airtime transfer from an arbitrary customer — this is why most Nigerian
 // VTU platforms handle it manually (an admin checks their recharge-pin

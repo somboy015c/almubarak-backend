@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { publicUser } = require('../utils/helpers');
-const paystack = require('../services/paystack');
+const flutterwave = require('../services/flutterwave');
 
 const router = express.Router();
 
@@ -15,7 +15,7 @@ router.get('/status', requireAuth, (req, res) => {
 });
 
 router.get('/banks', requireAuth, async (req, res) => {
-  const banks = await paystack.listBanks();
+  const banks = await flutterwave.listBanks();
   res.json({ banks });
 });
 
@@ -24,7 +24,7 @@ router.post('/resolve-account', requireAuth, async (req, res) => {
   if (!accountNumber || !bankCode) {
     return res.status(400).json({ error: 'Account number and bank are required.' });
   }
-  const result = await paystack.resolveAccount({ accountNumber, bankCode });
+  const result = await flutterwave.resolveAccount({ accountNumber, bankCode });
   if (!result.ok) {
     return res.status(422).json({ error: result.message || 'Could not verify that account number.' });
   }
@@ -76,8 +76,6 @@ router.put('/bank-account', requireAuth, requirePin, async (req, res) => {
   }
 
   const user = await User.findOne({ id: req.user.id });
-  // Reset the saved Paystack recipient whenever the account details change,
-  // so the next withdrawal registers a fresh recipient for the new details.
   user.bankAccount = { bankName, bankCode, accountNumber, accountName, recipientCode: null };
   await user.save();
 

@@ -13,8 +13,12 @@ const securityRoutes = require('./routes/security');
 const transferRoutes = require('./routes/transfer');
 const withdrawalRoutes = require('./routes/withdrawal');
 const airtimeToCashRoutes = require('./routes/airtime-to-cash');
+const webhookRoutes = require('./routes/webhooks');
 
 const app = express();
+
+// Render (and most hosts) sit behind a proxy; needed for correct per-IP rate limiting.
+app.set('trust proxy', 1);
 
 const allowedOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
@@ -37,8 +41,12 @@ app.use(express.json());
 
 // Basic protection against brute-forcing login/register
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
+// Stricter cap on endpoints that send email, to stop inbox spamming / Resend quota abuse
+const emailLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 8, message: { error: 'Too many requests. Please try again in a few minutes.' } });
+app.use(['/api/auth/forgot-password', '/api/auth/resend-verification'], emailLimiter);
 app.use('/api/auth', authLimiter, authRoutes);
 
+app.use('/api/webhooks', webhookRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/transactions', transactionRoutes);

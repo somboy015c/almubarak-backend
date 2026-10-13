@@ -9,6 +9,19 @@ const userSchema = new mongoose.Schema({
   walletBalance: { type: Number, default: 0 },
   isAdmin: { type: Boolean, default: false },
 
+  // Email verification. Deliberately NO schema default: accounts created
+  // before this feature have the field undefined and are treated as already
+  // verified. Only accounts explicitly set to false are blocked from login.
+  emailVerified: { type: Boolean },
+  verifyTokenHash: { type: String, default: null },
+  verifyTokenExpires: { type: Date, default: null },
+  verifyEmailSentAt: { type: Date, default: null },
+
+  // Password reset (single-use, short-lived; only the SHA-256 hash is stored)
+  resetTokenHash: { type: String, default: null },
+  resetTokenExpires: { type: Date, default: null },
+  resetEmailSentAt: { type: Date, default: null },
+
   // Hashed 4-digit PIN required to authorize transfers, withdrawals, and
   // airtime-to-cash requests. Null until the user sets one.
   transactionPin: { type: String, default: null },
@@ -20,8 +33,7 @@ const userSchema = new mongoose.Schema({
     bankCode: { type: String, default: null },
     accountNumber: { type: String, default: null },
     accountName: { type: String, default: null },
-    // Paystack's saved "transfer recipient" id, created once and reused
-    // for every future withdrawal so we don't recreate it each time.
+    // Legacy field (Paystack recipient id). Unused with Flutterwave; kept so old records load.
     recipientCode: { type: String, default: null }
   },
 
