@@ -5,7 +5,7 @@ const Transaction = require('../models/Transaction');
 const { getOrCreatePricing } = require('../models/Pricing');
 const { requireAuth } = require('../middleware/auth');
 const { applyMarkup, publicUser } = require('../utils/helpers');
-const vtpass = require('../services/vtpass');
+const provider = require('../services/arrifqubundle');
 
 const router = express.Router();
 
@@ -17,25 +17,30 @@ const DISCOS = [
   'yola-electric', 'aba-electric'
 ];
 
-const cleanPhone = (p) => String(p || '').replace(/\s+/g, '');
-const validPhone = (p) => /^(0|\+?234)?[789][01]\d{8}$/.test(cleanPhone(p));
+// The provider wants 11 digits starting with 0 (08031234567). Accept +234 / 234 / no leading 0 and convert.
+const cleanPhone = (p) => {
+  const digits = String(p || '').replace(/[^\d+]/g, '');
+  const m = digits.match(/^(?:\+?234|0)?([789][01]\d{8})$/);
+  return m ? `0${m[1]}` : digits;
+};
+const validPhone = (p) => /^0[789][01]\d{8}$/.test(cleanPhone(p));
 
 // ---- Catalog (data plans, cable bouquets, exam pins) ----
 
 router.get('/data/plans/:network', requireAuth, async (req, res) => {
-  const plans = await vtpass.getVariations('data', req.params.network);
+  const plans = await provider.getVariations('data', req.params.network);
   const pricing = await getOrCreatePricing();
   res.json({ plans: plans.map((p) => ({ ...p, price: applyMarkup(p.amount, pricing.data.markupPercent) })) });
 });
 
 router.get('/cable/plans/:provider', requireAuth, async (req, res) => {
-  const plans = await vtpass.getVariations('cable', req.params.provider);
+  const plans = await provider.getVariations('cable', req.params.provider);
   const pricing = await getOrCreatePricing();
   res.json({ plans: plans.map((p) => ({ ...p, price: applyMarkup(p.amount, pricing.cable.markupPercent) })) });
 });
 
 router.get('/exam/plans', requireAuth, async (req, res) => {
-  const plans = await vtpass.getVariations('exam');
+  const plans = await provider.getVariations('exam');
   const pricing = await getOrCreatePricing();
   res.json({ plans: plans.map((p) => ({ ...p, price: p.amount + pricing.exam.flatFee })) });
 });
@@ -51,27 +56,24 @@ router.get('/limits', requireAuth, async (req, res) => {
   });
 });
 
-// ---- Verify a meter number / smartcard / JAMB profile before paying ----
+// ---- Verify a meter number / smartcard before paying ----
 router.post('/verify', requireAuth, async (req, res) => {
-  const { kind, disco, provider, meter, meterType, smartcardNumber, profileId, variation_code } = req.body;
+  const { kind, disco, provider: cableProvider, meter, meterType, smartcardNumber } = req.body;
 
   let args;
   if (kind === 'electricity') {
     if (!DISCOS.includes(disco) || !meter) return res.status(400).json({ error: 'Choose a distribution company and enter the meter number.' });
-    args = { serviceID: disco, billersCode: String(meter).trim(), type: meterType === 'postpaid' ? 'postpaid' : 'prepaid' };
+    args = { kind, disco, meter: String(meter).trim(), meterType: meterType === 'postpaid' ? 'postpaid' : 'prepaid' };
   } else if (kind === 'cable') {
-    if (!CABLES.includes(provider) || !smartcardNumber) return res.status(400).json({ error: 'Choose a provider and enter the smartcard number.' });
-    args = { serviceID: provider, billersCode: String(smartcardNumber).trim() };
-  } else if (kind === 'jamb') {
-    if (!profileId) return res.status(400).json({ error: 'Enter the JAMB profile code.' });
-    args = { serviceID: 'jamb', billersCode: String(profileId).trim(), type: variation_code };
+    if (!CABLES.includes(cableProvider) || !smartcardNumber) return res.status(400).json({ error: 'Choose a provider and enter the smartcard number.' });
+    args = { kind, provider: cableProvider, smartcardNumber: String(smartcardNumber).trim() };
   } else {
     return res.status(400).json({ error: 'Unknown verification type.' });
   }
 
-  const result = await vtpass.verifyCustomer(args);
+  const result = await provider.verifyCustomer(args);
   if (!result.ok) return res.status(422).json({ error: result.message });
-  res.json({ customerName: result.customerName, details: result.details });
+  res.json({ customerName: result.customerName });
 });
 
 // ---- Shared purchase flow ----
@@ -91,7 +93,7 @@ async function chargeAndPurchase({ req, res, kind, price, description, payload }
     return res.status(402).json({ error: 'Insufficient wallet balance. Please fund your wallet.', code: 'INSUFFICIENT_BALANCE' });
   }
 
-  const result = await vtpass.purchase(kind, payload);
+  const result = await provider.purchase(kind, payload);
 
   const record = (status, extraMeta = {}) =>
     Transaction.create({
@@ -102,7 +104,7 @@ async function chargeAndPurchase({ req, res, kind, price, description, payload }
       amount: price,
       status,
       reference: result.request_id,
-      meta: { ...payload, ...extraMeta }
+      meta: { ...payload, providerId: result.providerId || null, providerCost: result.providerCost ?? null, ...extraMeta }
     });
 
   if (result.state === 'failed') {
@@ -168,7 +170,7 @@ router.post('/data', requireAuth, async (req, res) => {
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
 
   // The price comes from the provider catalog, never from the browser.
-  const plans = await vtpass.getVariations('data', network);
+  const plans = await provider.getVariations('data', network);
   const plan = plans.find((p) => p.variation_code === variation_code);
   if (!plan) return res.status(400).json({ error: 'That data plan is no longer available. Please pick another.' });
 
@@ -212,7 +214,7 @@ router.post('/cable', requireAuth, async (req, res) => {
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
 
-  const plans = await vtpass.getVariations('cable', provider);
+  const plans = await provider.getVariations('cable', provider);
   const plan = plans.find((p) => p.variation_code === variation_code);
   if (!plan) return res.status(400).json({ error: 'That bouquet is no longer available. Please pick another.' });
 
@@ -235,9 +237,9 @@ router.post('/exam', requireAuth, async (req, res) => {
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
 
-  const plans = await vtpass.getVariations('exam');
+  const plans = await provider.getVariations('exam');
   const plan = plans.find((p) => p.variation_code === variation_code && (!req.body.examBody || p.serviceID === req.body.examBody));
-  if (!plan) return res.status(400).json({ error: 'That PIN type is no longer available. Please pick another.' });
+  if (!plan) return res.status(400).json({ error: 'Exam PINs are not available right now.' });
   if (plan.needsProfile && !req.body.profileId) {
     return res.status(400).json({ error: 'Enter the JAMB profile code for this PIN.' });
   }

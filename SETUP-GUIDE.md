@@ -11,14 +11,16 @@ Do the parts **in order**. Each part says what you'll have at the end.
 | API (backend) | Render | Runs the Node server |
 | Database | MongoDB Atlas | Users, wallets, transactions |
 | Emails | Resend | Verification + password-reset emails |
-| Airtime / data / bills / exam PINs | VTpass | Delivers what customers buy |
+| Airtime / data / electricity / cable TV | Arrifqubundle | Delivers what customers buy |
 | Wallet funding + withdrawals | Flutterwave | Takes customer payments, pays out to banks |
 
 **Three stages, one switch.** `PROVIDER_MODE` in the backend settings controls everything:
 
 1. `mock`: nothing external is called. Safe for trying the app. (Emails are printed in the server log.)
-2. `live` + **VTpass sandbox URL + Flutterwave TEST keys**: real integration, fake money. Do this before going live.
-3. `live` + **VTpass live URL + Flutterwave LIVE keys**: real money.
+2. `live` + **Flutterwave TEST keys**: real provider calls (use small amounts, they spend your real Arrifqubundle balance), Flutterwave in test mode.
+3. `live` + **Flutterwave LIVE keys**: real customer payments.
+
+Arrifqubundle's documentation doesn't mention a test mode, so assume stage 2 purchases spend your real Arrifqubundle wallet. Test with ₦100 airtime.
 
 ---
 
@@ -51,9 +53,9 @@ Do the parts **in order**. Each part says what you'll have at the end.
 | `ADMIN_EMAIL` | the email you'll register as admin with |
 | `RESEND_API_KEY` | Part 4 |
 | `EMAIL_FROM` | `Elmubarak Digital Hub <no-reply@elmubarak.com.ng>` |
-| `VTPASS_BASE_URL` | `https://sandbox.vtpass.com/api` (later `https://vtpass.com/api`) |
-| `VTPASS_API_KEY`, `VTPASS_PUBLIC_KEY`, `VTPASS_SECRET_KEY` | Part 5 |
-| `VTPASS_LOW_BALANCE_ALERT` | `10000` (admin warning threshold, in naira) |
+| `ARRIFQU_API_KEY` | your Arrifqubundle API token (Part 5) |
+| `ARRIFQU_BASE_URL` | `https://www.arrifqubundle.com/api` |
+| `PROVIDER_LOW_BALANCE_ALERT` | `10000` (admin warning threshold, in naira) |
 | `FLW_SECRET_KEY`, `FLW_PUBLIC_KEY` | Part 6 |
 | `FLW_SECRET_HASH` | a random string you make up (`openssl rand -hex 24`) |
 | `API_PUBLIC_URL` | your Render URL, e.g. `https://almubarak-backend.onrender.com` |
@@ -61,7 +63,7 @@ Do the parts **in order**. Each part says what you'll have at the end.
 5. Click **Deploy**. When it's up, open `https://YOUR-RENDER-URL/api/health`. You should see `{"status":"ok",...}`.
 
 > **Free tier note:** Render's free plan sleeps after inactivity, so the first request can take ~30-60 seconds
-> and a payment/VTpass webhook may arrive late. That's fine for testing; for real customers use a paid
+> and a Flutterwave webhook may arrive late. That's fine for testing; for real customers use a paid
 > instance so the API is always awake.
 
 ---
@@ -109,26 +111,37 @@ Until the domain is verified, Resend only delivers to your own account email. Th
 
 ---
 
-## Part 5: VTpass (airtime, data, electricity, cable, exam PINs)
+## Part 5: Arrifqubundle (airtime, data, electricity, cable TV)
 
-### 5a. Sandbox first (free, fake money)
-1. Create a **sandbox** account at https://sandbox.vtpass.com (separate from the live site).
-2. **Profile** -> **API Settings**: copy the **API Key**, **Public Key** and **Secret Key**.
-3. In Render set `VTPASS_BASE_URL=https://sandbox.vtpass.com/api` and the three keys.
-   VTpass's documentation lists sandbox test phone numbers/meters for success and failure cases.
+1. Create/log in to your account at https://www.arrifqubundle.com and **fund your wallet**. This balance is what pays for everything customers buy.
+2. Open https://www.arrifqubundle.com/documentation/ (while logged in) and copy your **API token**.
+   **Treat the token like a password.** Anyone with it can spend your wallet. If it has been pasted into a chat, email or shared document,
+   regenerate it on the site first and use the new one.
+3. In Render set `ARRIFQU_API_KEY` to the token and `ARRIFQU_BASE_URL=https://www.arrifqubundle.com/api`.
+4. Set `PROVIDER_MODE=live` and redeploy.
+5. **Confirm the integration** (important, do not skip): log in as admin -> **Admin panel** -> **Overview** -> click **Provider check**.
+   It prints what Arrifqubundle returns (with secrets hidden). Check:
+   - `detectedBalance` equals the balance you see on the Arrifqubundle site.
+   - `networkIds`, `cableIds` and `discoIds` are all numbers (not `null`), and `sampleDataPlans` / `sampleCablePlans` show real plans with prices.
+   - `examPins` lists WAEC/NECO if the provider offers them (otherwise Exam PINs stay "Coming soon").
+   - Read any `warnings` it shows.
+   If something is wrong, copy the whole output and send it to me, or set the override in Render (`ARRIFQU_NETWORK_IDS`, `ARRIFQU_CABLE_IDS`,
+   `ARRIFQU_DISCO_IDS`, see `.env.example`). If orders for electricity are rejected because of `MeterType`, set `ARRIFQU_METERTYPE_STYLE=name`.
+6. Buy ₦100 airtime to your own number, then one small data plan, then (if you plan to sell them) one small electricity/cable purchase, and confirm each works.
 
-### 5b. Live
-1. Create/verify a business account at https://vtpass.com (complete their KYC).
-2. **Fund your VTpass wallet.** This is the money that actually pays for what customers buy.
-3. **Profile** -> **API Settings**: copy the **live** keys (different from sandbox) and **whitelist your server's IP**
-   (VTpass rejects live calls from unknown IPs). Render lists your service's **outbound IP addresses** in the service's
-   *Connect* menu. Add all of them. If balance/purchases fail with a 401/403 after going live, this is almost always the cause.
-4. In the same settings page set the **Webhook URL** to `https://YOUR-RENDER-URL/api/webhooks/vtpass`.
-   (This lets slow orders settle automatically; the app also re-checks them itself.)
-5. In Render change `VTPASS_BASE_URL` to `https://vtpass.com/api` and replace the keys with the live ones.
+**Things this type of provider commonly does (check with Arrifqubundle support):**
+- **Account type "API".** Some providers allow only 1 purchase per minute on normal accounts. If customers see "Too many orders at once", ask support to set your account to API.
+- **Allowed-IP lock.** If you saved an allowed IP in your provider account, purchases from any other IP are refused. Either remove the lock or add your Render outbound IPs.
+- **Price list.** The plan prices the API lists may be the standard prices, not your reseller price. Compare with what your wallet is actually charged
+  (each order stores the provider's charge) and set your Pricing markup in Admin accordingly.
+- **Phone numbers** are sent in the 11-digit format (08031234567); `+234...` numbers customers type are converted automatically.
 
-**Seeing the VTpass balance:** log in as admin -> **Admin panel** -> **Overview**. The **VTpass wallet balance** card shows your live VTpass balance
-(with Refresh, an *Open VTpass dashboard* button, and a red warning below `VTPASS_LOW_BALANCE_ALERT`). Admins also see it at the top of their normal dashboard.
+**Slow orders:** if the provider takes long to answer, the order shows "processing" and the money is held. The server re-checks it every
+2 minutes (data orders can be found again by their reference even after a timeout) and refunds only if Arrifqubundle confirms it failed. If one stays stuck (for example the provider was unreachable),
+open Admin -> **Transactions** and use **Mark paid** or **Refund** on that row after checking the Arrifqubundle transaction history.
+
+**Seeing the provider balance:** Admin panel -> **Overview** shows your live Arrifqubundle wallet balance (with Refresh, an *Open provider dashboard* button,
+and a red warning below `PROVIDER_LOW_BALANCE_ALERT`). Admins also see it at the top of their normal dashboard.
 
 ---
 
@@ -169,13 +182,14 @@ Until the domain is verified, Resend only delivers to your own account email. Th
 - [ ] Fund wallet, buy airtime/data/electricity/cable/exam. Receipt appears each time.
 - [ ] Phone `00000000000` simulates a failure (wallet refunded); `11111111111` simulates a slow "processing" order.
 
-**Stage B: sandbox/test (`PROVIDER_MODE=live` + sandbox URL + Flutterwave test keys):**
+**Stage B: real provider + Flutterwave test keys (`PROVIDER_MODE=live`):**
 - [ ] Real verification email arrives from `no-reply@elmubarak.com.ng` (check spam once).
 - [ ] Fund wallet with the test card -> redirected back -> balance credited.
-- [ ] Buy data/airtime on VTpass sandbox; meter/smartcard verification returns a name.
-- [ ] Admin Overview shows the VTpass sandbox balance.
+- [ ] Provider check shows the right balance and IDs (Part 5, step 5).
+- [ ] Buy ₦100 airtime and a small data plan; meter/smartcard verification returns the customer name.
+- [ ] Admin Overview shows your Arrifqubundle balance.
 
-**Stage C: production:** switch to live URL/keys (Parts 5b, 6b), fund VTpass, then do one small real purchase and one small real withdrawal before announcing.
+**Stage C: production:** switch to Flutterwave live keys (Part 6b), then do one small real funding and one small real withdrawal before announcing.
 
 ---
 
@@ -187,14 +201,16 @@ Until the domain is verified, Resend only delivers to your own account email. Th
 | Verification link goes to wrong site | `FRONTEND_URL` wrong in Render |
 | Browser shows CORS error | `CLIENT_ORIGIN` missing `https://elmubarak.com.ng` (and `www`) |
 | "Could not reach the server" | `API_BASE_URL` in `js/config.js` wrong, or Render is waking up (free tier) |
-| Admin balance card says VTpass rejected keys / IP | Wrong keys, sandbox keys on live URL (or vice versa), or Render outbound IPs not whitelisted on VTpass |
+| Admin balance card says the provider rejected the key | Wrong or regenerated `ARRIFQU_API_KEY`, or the token has a stray space |
+| Balance card says it could not find the balance | Run **Provider check** and send me the output so I can map the field |
+| Customer gets "service temporarily unavailable" for one network/disco | That ID is missing/wrong: run **Provider check**, fix with the ARRIFQU_*_IDS overrides |
 | Paid on Flutterwave but wallet not credited | Webhook URL/secret hash mismatch; wait a minute and refresh (the app also re-verifies); check logs |
 | Withdrawal fails | Payouts not enabled / IPs not whitelisted / low Flutterwave balance. See Render logs |
-| Orders stuck on "processing" | Normal for a few minutes; they settle automatically. Persisting >30 min: check VTpass transaction history and adjust the user's wallet in Admin |
-| Customers see "service temporarily unavailable" | Your VTpass wallet is empty. Top it up |
+| Orders stuck on "processing" | Normal for a few minutes; they settle automatically. Still stuck after ~30 min: check Arrifqubundle's transaction history, then use **Mark paid** / **Refund** in Admin -> Transactions |
+| Customers see "service temporarily unavailable" everywhere | Your Arrifqubundle wallet is empty. Top it up |
 
 ## Security checklist before launch
 - `JWT_SECRET` is long and random; `.env` is never committed to GitHub.
 - `CLIENT_ORIGIN` lists only your real domains.
-- Keys in Render are **live** keys only after testing is complete; never paste keys into chat/screenshots.
-- Keep Render, Atlas, Resend, VTpass and Flutterwave logins protected with 2-factor authentication.
+- Keys in Render are **live** keys only after testing is complete; never paste keys, tokens or API documentation containing them into chats, screenshots or repositories.
+- Keep Render, Atlas, Resend, Arrifqubundle and Flutterwave logins protected with 2-factor authentication.

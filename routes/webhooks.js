@@ -1,4 +1,4 @@
-// Webhooks from VTpass and Flutterwave. No login here (the providers call us),
+// Webhooks from Flutterwave. No login here (the providers call us),
 // so NOTHING in a webhook body is trusted: we always re-check with the provider.
 
 const express = require('express');
@@ -7,7 +7,6 @@ const Transaction = require('../models/Transaction');
 const Withdrawal = require('../models/Withdrawal');
 const User = require('../models/User');
 const { settleFunding } = require('../services/funding');
-const { settlePendingTransaction } = require('../services/settle');
 
 const router = express.Router();
 
@@ -16,20 +15,6 @@ function safeEqual(a, b) {
   const y = Buffer.from(String(b || ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
-
-// ---- VTpass: set this URL in VTpass dashboard -> Profile -> API Settings -> Webhook ----
-router.post('/vtpass', async (req, res) => {
-  // VTpass expects this exact reply.
-  res.json({ response: 'success' });
-  try {
-    const requestId = req.body?.data?.requestId || req.body?.requestId;
-    if (!requestId) return;
-    const tx = await Transaction.findOne({ reference: String(requestId) });
-    await settlePendingTransaction(tx);
-  } catch (err) {
-    console.error('VTpass webhook error:', err.message);
-  }
-});
 
 // ---- Flutterwave: set URL + secret hash in Flutterwave dashboard -> Settings -> Webhooks ----
 router.post('/flutterwave', async (req, res) => {

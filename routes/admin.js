@@ -7,7 +7,7 @@ const AirtimeToCash = require('../models/AirtimeToCash');
 const { getOrCreatePricing, Pricing } = require('../models/Pricing');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { publicUser } = require('../utils/helpers');
-const vtpass = require('../services/vtpass');
+const provider = require('../services/arrifqubundle');
 
 const router = express.Router();
 
@@ -26,22 +26,50 @@ router.get('/stats', async (req, res) => {
   });
 });
 
-// Live VTpass wallet balance (the money that actually pays for airtime/data/etc.)
+// Live provider wallet balance (the money that actually pays for airtime/data/etc.)
 router.get('/provider-balance', async (req, res) => {
-  const result = await vtpass.getBalance();
-  const threshold = Number(process.env.VTPASS_LOW_BALANCE_ALERT || 10000);
+  const result = await provider.getBalance();
+  const threshold = Number(process.env.PROVIDER_LOW_BALANCE_ALERT || 10000);
   if (!result.ok) {
-    return res.status(502).json({ error: result.message || 'Could not fetch the VTpass balance.' });
+    return res.status(502).json({ error: result.message || 'Could not fetch the provider balance.' });
   }
   res.json({
-    provider: 'VTpass',
+    provider: 'Arrifqubundle',
     balance: result.balance,
     mock: !!result.mock,
     threshold,
     low: result.balance < threshold,
-    dashboardUrl: (process.env.VTPASS_BASE_URL || '').includes('sandbox') ? 'https://sandbox.vtpass.com/' : 'https://vtpass.com/',
+    dashboardUrl: 'https://www.arrifqubundle.com/',
     checkedAt: new Date().toISOString()
   });
+});
+
+// Shows what the provider actually returns (IDs, plans, balance field) so the
+// integration can be checked. Secrets are hidden.
+router.get('/provider-check', async (req, res) => {
+  res.json(await provider.diagnostics());
+});
+
+// Resolve an order that is stuck "pending" and could not be looked up automatically.
+router.post('/transactions/:id/resolve', async (req, res) => {
+  const { action } = req.body; // 'success' | 'refund'
+  const tx = await Transaction.findOne({ id: req.params.id });
+  if (!tx) return res.status(404).json({ error: 'Transaction not found.' });
+  if (tx.status !== 'pending') return res.status(400).json({ error: 'This transaction is not pending.' });
+  if (!['airtime', 'data', 'electricity', 'cable', 'exam'].includes(tx.type)) {
+    return res.status(400).json({ error: 'Only service orders can be resolved here.' });
+  }
+
+  if (action === 'success') {
+    await Transaction.updateOne({ id: tx.id, status: 'pending' }, { status: 'success' });
+    return res.json({ message: 'Marked as successful.' });
+  }
+  if (action === 'refund') {
+    const flipped = await Transaction.findOneAndUpdate({ id: tx.id, status: 'pending' }, { status: 'failed' });
+    if (flipped) await User.updateOne({ id: tx.userId }, { $inc: { walletBalance: Number(tx.amount) } });
+    return res.json({ message: 'Marked as failed and the customer was refunded.' });
+  }
+  res.status(400).json({ error: 'Choose "success" or "refund".' });
 });
 
 router.get('/users', async (req, res) => {

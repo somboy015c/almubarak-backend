@@ -1,6 +1,6 @@
 // Automatic airtime-to-cash verification.
 //
-// Unlike VTpass (buying airtime) or Flutterwave (payments/transfers), there
+// Unlike the main provider (buying airtime) or Flutterwave (payments/transfers), there
 // isn't one standard, universally-used API for verifying an *incoming*
 // airtime transfer from an arbitrary customer — this is why most Nigerian
 // VTU platforms handle it manually (an admin checks their recharge-pin
@@ -8,7 +8,7 @@
 //
 // This file gives you a slot to plug a real provider into if/when you
 // contract with one (some resellers and aggregators offer this as an
-// add-on service — ask whichever VTU aggregator you use for VTpass-style
+// add-on service — ask whichever VTU aggregator you use for your provider
 // services whether they also offer airtime-to-cash verification, since
 // it's sometimes bundled).
 //

@@ -8,7 +8,7 @@ const router = express.Router();
 router.get('/', requireAuth, async (req, res) => {
   let transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(300);
 
-  // Opportunistically settle recent pending service orders (checks VTpass).
+  // Opportunistically settle recent pending service orders (checks the provider).
   const stale = transactions
     .filter((t) => t.status === 'pending' && SERVICE_TYPES.includes(t.type) && Date.now() - new Date(t.createdAt).getTime() > 15000)
     .slice(0, 5);

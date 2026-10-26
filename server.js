@@ -14,6 +14,7 @@ const transferRoutes = require('./routes/transfer');
 const withdrawalRoutes = require('./routes/withdrawal');
 const airtimeToCashRoutes = require('./routes/airtime-to-cash');
 const webhookRoutes = require('./routes/webhooks');
+const { settleAllPending } = require('./services/settle');
 
 const app = express();
 
@@ -77,6 +78,8 @@ connectDB()
     app.listen(PORT, () => {
       console.log(`Elmubarak VTU API running on port ${PORT} (${process.env.PROVIDER_MODE || 'mock'} mode)`);
     });
+    // The provider has no webhook, so check slow orders every 2 minutes.
+    setInterval(() => settleAllPending().catch((e) => console.error('Settle sweep failed:', e.message)), 2 * 60 * 1000);
   })
   .catch((err) => {
     console.error('Failed to connect to MongoDB:', err.message);
