@@ -10,7 +10,7 @@ const axios = require('axios');
 const { generateRef } = require('../utils/helpers');
 
 const isLive = () => process.env.PROVIDER_MODE === 'live';
-const frontendUrl = () => (process.env.FRONTEND_URL || 'https://elmubarak.com.ng').replace(/\/+$/, '');
+const { frontendUrl } = require('../utils/urls');
 
 const client = () =>
   axios.create({

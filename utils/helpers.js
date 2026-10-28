@@ -35,4 +35,6 @@ function hashToken(raw) {
   return crypto.createHash('sha256').update(String(raw)).digest('hex');
 }
 
-module.exports = { generateRef, applyMarkup, publicUser, createToken, hashToken };
+const round2 = (n) => Math.round(Number(n) * 100) / 100;
+
+module.exports = { round2, generateRef, applyMarkup, publicUser, createToken, hashToken };

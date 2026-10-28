@@ -16,6 +16,9 @@ async function requireAuth(req, res, next) {
     if (!user) {
       return res.status(401).json({ error: 'Your session is no longer valid. Please sign in again.' });
     }
+    if (user.suspended) {
+      return res.status(403).json({ error: 'This account has been suspended. Please contact support.', code: 'ACCOUNT_SUSPENDED' });
+    }
     req.user = user;
     next();
   } catch (err) {

@@ -8,6 +8,9 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   walletBalance: { type: Number, default: 0 },
   isAdmin: { type: Boolean, default: false },
+  suspended: { type: Boolean, default: false },
+  suspendedReason: { type: String, default: '' },
+  lastLoginAt: { type: Date, default: null },
 
   // Email verification. Deliberately NO schema default: accounts created
   // before this feature have the field undefined and are treated as already

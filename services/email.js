@@ -11,7 +11,7 @@ const axios = require('axios');
 const BRAND = 'Elmubarak Digital Hub';
 const BRAND_COLOR = '#146C43';
 
-const frontendUrl = () => (process.env.FRONTEND_URL || 'https://elmubarak.com.ng').replace(/\/+$/, '');
+const { frontendUrl } = require('../utils/urls');
 const fromAddress = () => process.env.EMAIL_FROM || `${BRAND} <no-reply@elmubarak.com.ng>`;
 
 function layout({ heading, intro, buttonText, link, footnote }) {

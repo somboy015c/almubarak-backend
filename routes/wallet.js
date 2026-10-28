@@ -3,13 +3,14 @@ const { v4: uuidv4 } = require('uuid');
 const User = require('../models/User');
 const Funding = require('../models/Funding');
 const { requireAuth } = require('../middleware/auth');
+const { requireService } = require('../middleware/services');
 const { publicUser } = require('../utils/helpers');
 const flutterwave = require('../services/flutterwave');
 const { settleFunding } = require('../services/funding');
 
 const router = express.Router();
 
-router.post('/fund/initialize', requireAuth, async (req, res) => {
+router.post('/fund/initialize', requireAuth, requireService('funding'), async (req, res) => {
   const numericAmount = Number(req.body.amount);
 
   if (!numericAmount || numericAmount < 100) {
@@ -59,8 +60,9 @@ router.post('/fund/verify', requireAuth, async (req, res) => {
 
   if (result.state === 'success') {
     return res.json({
-      message: result.alreadyCredited ? 'Payment already credited.' : 'Wallet funded successfully.',
+      message: result.order ? (result.order.message || 'Payment received.') : result.alreadyCredited ? 'Payment already credited.' : 'Wallet funded successfully.',
       state: 'success',
+      order: result.order || null,
       user: publicUser(user)
     });
   }

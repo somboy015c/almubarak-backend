@@ -7,6 +7,7 @@ const Transaction = require('../models/Transaction');
 const Withdrawal = require('../models/Withdrawal');
 const User = require('../models/User');
 const { settleFunding } = require('../services/funding');
+const { logEvent } = require('../utils/log');
 
 const router = express.Router();
 
@@ -19,6 +20,7 @@ function safeEqual(a, b) {
 // ---- Flutterwave: set URL + secret hash in Flutterwave dashboard -> Settings -> Webhooks ----
 router.post('/flutterwave', async (req, res) => {
   if (!process.env.FLW_SECRET_HASH || !safeEqual(req.headers['verif-hash'], process.env.FLW_SECRET_HASH)) {
+    logEvent({ category: 'payment', level: 'error', action: 'webhook.rejected', message: 'Flutterwave webhook rejected: secret hash missing or does not match FLW_SECRET_HASH', req });
     return res.status(401).end();
   }
   res.status(200).end();
@@ -28,6 +30,7 @@ router.post('/flutterwave', async (req, res) => {
     const data = req.body?.data || {};
 
     if (event === 'charge.completed' && data.tx_ref) {
+      logEvent({ category: 'payment', action: 'webhook.charge', message: `Flutterwave webhook: charge ${data.tx_ref}`, meta: { status: data.status, amount: data.amount } });
       await settleFunding(data.tx_ref); // re-verifies with Flutterwave before crediting
     }
 

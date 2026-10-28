@@ -18,4 +18,7 @@ services/flutterwave.js Flutterwave: checkout, banks, account lookup, payouts
 services/email.js      Resend emails (verification + reset)
 services/funding.js    credits a payment exactly once (browser + webhook safe)
 services/settle.js     settles slow orders (refund only when the provider confirms failure)
+services/orders.js     runs a purchase (wallet debit, provider, refund) and starts pay-with-Flutterwave orders
+models/Settings.js     admin switches (services, networks, plans, maintenance, notice)
+models/Log.js          activity log (auto-deleted after 90 days)
 ```

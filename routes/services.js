@@ -1,21 +1,17 @@
 const express = require('express');
-const { v4: uuidv4 } = require('uuid');
-const User = require('../models/User');
-const Transaction = require('../models/Transaction');
 const { getOrCreatePricing } = require('../models/Pricing');
+const { getSettings, isServiceOn, SERVICES } = require('../models/Settings');
 const { requireAuth } = require('../middleware/auth');
-const { applyMarkup, publicUser } = require('../utils/helpers');
+const { requireService } = require('../middleware/services');
+const { applyMarkup, round2 } = require('../utils/helpers');
+const { logEvent } = require('../utils/log');
 const provider = require('../services/arrifqubundle');
+const { executePurchase, startDirectPayment } = require('../services/orders');
 
 const router = express.Router();
 
 const NETWORKS = ['mtn', 'airtel', 'glo', '9mobile'];
 const CABLES = ['dstv', 'gotv', 'startimes'];
-const DISCOS = [
-  'ikeja-electric', 'eko-electric', 'abuja-electric', 'kano-electric', 'portharcourt-electric',
-  'ibadan-electric', 'jos-electric', 'kaduna-electric', 'enugu-electric', 'benin-electric',
-  'yola-electric', 'aba-electric'
-];
 
 // The provider wants 11 digits starting with 0 (08031234567). Accept +234 / 234 / no leading 0 and convert.
 const cleanPhone = (p) => {
@@ -25,24 +21,72 @@ const cleanPhone = (p) => {
 };
 const validPhone = (p) => /^0[789][01]\d{8}$/.test(cleanPhone(p));
 
-// ---- Catalog (data plans, cable bouquets, exam pins) ----
+const unavailable = (res, msg) =>
+  res.status(503).json({ error: msg || 'This option is currently unavailable.', code: 'SERVICE_DISABLED' });
+
+// ---- What is switched on (the dashboard hides everything that is off) ----
+router.get('/status', requireAuth, async (req, res) => {
+  const s = await getSettings();
+  const services = Object.fromEntries(SERVICES.map((k) => [k, isServiceOn(s, k)]));
+  res.json({
+    maintenance: s.maintenance,
+    maintenanceMessage: s.maintenanceMessage,
+    notice: s.notice,
+    services,
+    networks: Object.fromEntries(NETWORKS.map((n) => [n, !s.disabledNetworks.includes(n)])),
+    cables: Object.fromEntries(CABLES.map((c) => [c, !s.disabledCables.includes(c)]))
+  });
+});
+
+// ---- Catalogue (data plans, cable packages, exam pins, electricity companies) ----
 
 router.get('/data/plans/:network', requireAuth, async (req, res) => {
-  const plans = await provider.getVariations('data', req.params.network);
-  const pricing = await getOrCreatePricing();
-  res.json({ plans: plans.map((p) => ({ ...p, price: applyMarkup(p.amount, pricing.data.markupPercent) })) });
+  const network = req.params.network;
+  if (!NETWORKS.includes(network)) return res.status(400).json({ error: 'Unknown network.' });
+  const s = await getSettings();
+  if (!isServiceOn(s, 'data') || s.disabledNetworks.includes(network)) return res.json({ plans: [], categories: [] });
+
+  const [plans, pricing] = await Promise.all([provider.getVariations('data', network), getOrCreatePricing()]);
+  const visible = plans
+    .filter((p) => !s.disabledPlans.includes(`data:${p.variation_code}`) && !s.disabledCategories.includes(`${network}|${p.category}`))
+    .map((p) => ({ ...p, price: applyMarkup(p.amount, pricing.data.markupPercent) }));
+
+  const counts = {};
+  visible.forEach((p) => { counts[p.category] = (counts[p.category] || 0) + 1; });
+  const categories = Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+  res.json({ plans: visible, categories });
 });
 
 router.get('/cable/plans/:provider', requireAuth, async (req, res) => {
-  const plans = await provider.getVariations('cable', req.params.provider);
-  const pricing = await getOrCreatePricing();
-  res.json({ plans: plans.map((p) => ({ ...p, price: applyMarkup(p.amount, pricing.cable.markupPercent) })) });
+  const cable = req.params.provider;
+  if (!CABLES.includes(cable)) return res.status(400).json({ error: 'Unknown cable provider.' });
+  const s = await getSettings();
+  if (!isServiceOn(s, 'cable') || s.disabledCables.includes(cable)) return res.json({ plans: [] });
+
+  const [plans, pricing] = await Promise.all([provider.getVariations('cable', cable), getOrCreatePricing()]);
+  res.json({
+    plans: plans
+      .filter((p) => !s.disabledPlans.includes(`cable:${p.variation_code}`))
+      .map((p) => ({ ...p, price: applyMarkup(p.amount, pricing.cable.markupPercent) }))
+  });
 });
 
 router.get('/exam/plans', requireAuth, async (req, res) => {
-  const plans = await provider.getVariations('exam');
-  const pricing = await getOrCreatePricing();
-  res.json({ plans: plans.map((p) => ({ ...p, price: p.amount + pricing.exam.flatFee })) });
+  const s = await getSettings();
+  if (!isServiceOn(s, 'exam')) return res.json({ plans: [] });
+  const [plans, pricing] = await Promise.all([provider.getVariations('exam'), getOrCreatePricing()]);
+  res.json({
+    plans: plans
+      .filter((p) => !s.disabledPlans.includes(`exam:${p.variation_code}`))
+      .map((p) => ({ ...p, price: round2(p.amount + pricing.exam.flatFee) }))
+  });
+});
+
+router.get('/electricity/discos', requireAuth, async (req, res) => {
+  const s = await getSettings();
+  if (!isServiceOn(s, 'electricity')) return res.json({ discos: [] });
+  const discos = await provider.getDiscos();
+  res.json({ discos: discos.filter((d) => !s.disabledDiscos.includes(String(d.id))) });
 });
 
 // Rates/limits shown in forms (not sensitive, just current settings)
@@ -62,8 +106,9 @@ router.post('/verify', requireAuth, async (req, res) => {
 
   let args;
   if (kind === 'electricity') {
-    if (!DISCOS.includes(disco) || !meter) return res.status(400).json({ error: 'Choose a distribution company and enter the meter number.' });
-    args = { kind, disco, meter: String(meter).trim(), meterType: meterType === 'postpaid' ? 'postpaid' : 'prepaid' };
+    const d = (await provider.getDiscos()).find((x) => String(x.id) === String(disco));
+    if (!d || !meter) return res.status(400).json({ error: 'Choose a distribution company and enter the meter number.' });
+    args = { kind, discoId: d.id, discoName: d.name, meter: String(meter).trim(), meterType: meterType === 'postpaid' ? 'postpaid' : 'prepaid' };
   } else if (kind === 'cable') {
     if (!CABLES.includes(cableProvider) || !smartcardNumber) return res.status(400).json({ error: 'Choose a provider and enter the smartcard number.' });
     args = { kind, provider: cableProvider, smartcardNumber: String(smartcardNumber).trim() };
@@ -72,76 +117,32 @@ router.post('/verify', requireAuth, async (req, res) => {
   }
 
   const result = await provider.verifyCustomer(args);
-  if (!result.ok) return res.status(422).json({ error: result.message });
+  if (!result.ok) {
+    logEvent({ category: 'provider', level: 'warn', action: 'verify.failed', message: `${kind} verification failed`, user: { id: req.user.id, email: req.user.email }, meta: { kind, provider: cableProvider || args.discoName } });
+    return res.status(422).json({ error: result.message });
+  }
+  if (result.style === 'name') {
+    logEvent({ category: 'provider', action: 'verify.style', message: `${kind} verification worked using names, not IDs`, meta: { kind } });
+  }
   res.json({ customerName: result.customerName });
 });
 
-// ---- Shared purchase flow ----
-
-async function chargeAndPurchase({ req, res, kind, price, description, payload }) {
-  price = Math.round(Number(price) * 100) / 100;
-  if (!price || price <= 0) return res.status(400).json({ error: 'Invalid amount.' });
-
-  // Atomic debit: succeeds only if the balance still covers the price. Two
-  // simultaneous requests can never spend the same money twice.
-  const debited = await User.findOneAndUpdate(
-    { id: req.user.id, walletBalance: { $gte: price } },
-    { $inc: { walletBalance: -price } },
-    { new: true }
-  );
-  if (!debited) {
-    return res.status(402).json({ error: 'Insufficient wallet balance. Please fund your wallet.', code: 'INSUFFICIENT_BALANCE' });
+// ---- Shared: pay from the wallet, or pay this one order with Flutterwave ----
+async function dispatch(req, res, order) {
+  if (req.body.payWith === 'flutterwave') {
+    const s = await getSettings();
+    if (!isServiceOn(s, 'funding')) {
+      return unavailable(res, 'Card and bank payments are currently unavailable. Please pay from your wallet.');
+    }
+    const out = await startDirectPayment({ user: req.user, order });
+    return res.status(out.status).json(out.body);
   }
-
-  const result = await provider.purchase(kind, payload);
-
-  const record = (status, extraMeta = {}) =>
-    Transaction.create({
-      id: uuidv4(),
-      userId: req.user.id,
-      type: kind,
-      description,
-      amount: price,
-      status,
-      reference: result.request_id,
-      meta: { ...payload, providerId: result.providerId || null, providerCost: result.providerCost ?? null, ...extraMeta }
-    });
-
-  if (result.state === 'failed') {
-    await User.updateOne({ id: req.user.id }, { $inc: { walletBalance: price } }); // refund
-    await record('failed');
-    const fresh = await User.findOne({ id: req.user.id });
-    return res.status(422).json({
-      error: result.message || 'Transaction failed. You have not been charged.',
-      user: publicUser(fresh)
-    });
-  }
-
-  if (result.state === 'pending') {
-    // Outcome not confirmed yet: keep the money held, settle via webhook / re-query.
-    await record('pending');
-    const fresh = await User.findOne({ id: req.user.id });
-    return res.status(202).json({
-      pending: true,
-      message: 'Your order is being processed. You will see the final status in Transactions shortly.',
-      reference: result.request_id,
-      user: publicUser(fresh)
-    });
-  }
-
-  await record('success', { token: result.token || null, cards: result.cards || null });
-  const fresh = await User.findOne({ id: req.user.id });
-  res.json({
-    message: result.message || 'Transaction successful',
-    reference: result.request_id,
-    token: result.token || null,
-    cards: result.cards || null,
-    user: publicUser(fresh)
-  });
+  const out = await executePurchase({ userId: req.user.id, ...order });
+  res.status(out.status).json(out.body);
 }
 
 // ---- Airtime ----
-router.post('/airtime', requireAuth, async (req, res) => {
+router.post('/airtime', requireAuth, requireService('airtime'), async (req, res) => {
   const { network } = req.body;
   const phone = cleanPhone(req.body.phone);
   const amount = Number(req.body.amount);
@@ -150,10 +151,12 @@ router.post('/airtime', requireAuth, async (req, res) => {
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
   if (amount < 50 || amount > 50000) return res.status(400).json({ error: 'Airtime amount must be between ₦50 and ₦50,000.' });
+  const s = await getSettings();
+  if (s.disabledNetworks.includes(network)) return unavailable(res, `${network.toUpperCase()} airtime is currently unavailable.`);
 
   const pricing = await getOrCreatePricing();
-  await chargeAndPurchase({
-    req, res, kind: 'airtime',
+  await dispatch(req, res, {
+    kind: 'airtime',
     price: applyMarkup(amount, pricing.airtime.markupPercent),
     description: `${network.toUpperCase()} airtime to ${phone}`,
     payload: { network, phone, amount, faceValue: amount }
@@ -161,7 +164,7 @@ router.post('/airtime', requireAuth, async (req, res) => {
 });
 
 // ---- Data ----
-router.post('/data', requireAuth, async (req, res) => {
+router.post('/data', requireAuth, requireService('data'), async (req, res) => {
   const { network, variation_code } = req.body;
   const phone = cleanPhone(req.body.phone);
   if (!NETWORKS.includes(network) || !phone || !variation_code) {
@@ -169,66 +172,78 @@ router.post('/data', requireAuth, async (req, res) => {
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
 
-  // The price comes from the provider catalog, never from the browser.
+  const s = await getSettings();
+  if (s.disabledNetworks.includes(network)) return unavailable(res, `${network.toUpperCase()} data is currently unavailable.`);
+
+  // The price comes from the provider catalogue, never from the browser.
   const plans = await provider.getVariations('data', network);
-  const plan = plans.find((p) => p.variation_code === variation_code);
-  if (!plan) return res.status(400).json({ error: 'That data plan is no longer available. Please pick another.' });
+  const plan = plans.find((p) => p.variation_code === String(variation_code));
+  if (!plan || s.disabledPlans.includes(`data:${plan.variation_code}`) || s.disabledCategories.includes(`${network}|${plan.category}`)) {
+    return res.status(400).json({ error: 'That data plan is no longer available. Please pick another.' });
+  }
 
   const pricing = await getOrCreatePricing();
-  await chargeAndPurchase({
-    req, res, kind: 'data',
+  await dispatch(req, res, {
+    kind: 'data',
     price: applyMarkup(plan.amount, pricing.data.markupPercent),
-    description: `${network.toUpperCase()} ${plan.name} to ${phone}`,
-    payload: { network, phone, variation_code, planName: plan.name }
+    description: `${network.toUpperCase()} ${plan.category} ${plan.name} to ${phone}`,
+    payload: { network, phone, variation_code: plan.variation_code, planName: plan.name, category: plan.category }
   });
 });
 
 // ---- Electricity ----
-router.post('/electricity', requireAuth, async (req, res) => {
-  const { disco, meterType } = req.body;
+router.post('/electricity', requireAuth, requireService('electricity'), async (req, res) => {
+  const { meterType } = req.body;
   const meter = String(req.body.meter || '').trim();
   const phone = cleanPhone(req.body.phone);
   const amount = Number(req.body.amount);
-  if (!DISCOS.includes(disco) || !meter || !['prepaid', 'postpaid'].includes(meterType) || !phone || !amount) {
+  const disco = (await provider.getDiscos()).find((d) => String(d.id) === String(req.body.disco));
+  if (!disco || !meter || !['prepaid', 'postpaid'].includes(meterType) || !phone || !amount) {
     return res.status(400).json({ error: 'Disco, meter number, meter type, phone and amount are required.' });
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
   if (amount < 500 || amount > 500000) return res.status(400).json({ error: 'Amount must be between ₦500 and ₦500,000.' });
+  const s = await getSettings();
+  if (s.disabledDiscos.includes(String(disco.id))) return unavailable(res, `${disco.name} is currently unavailable.`);
 
   const pricing = await getOrCreatePricing();
-  await chargeAndPurchase({
-    req, res, kind: 'electricity',
+  await dispatch(req, res, {
+    kind: 'electricity',
     price: applyMarkup(amount, pricing.electricity.markupPercent),
-    description: `${disco.replace('-electric', '').toUpperCase()} ${meterType} - meter ${meter}`,
-    payload: { disco, meter, variation_code: meterType, phone, amount, customerName: req.body.customerName || null }
+    description: `${disco.name} ${meterType} - meter ${meter}`,
+    payload: { discoId: disco.id, discoName: disco.name, meter, variation_code: meterType, phone, amount, customerName: req.body.customerName || null }
   });
 });
 
 // ---- Cable TV ----
-router.post('/cable', requireAuth, async (req, res) => {
-  const { provider, variation_code } = req.body;
+router.post('/cable', requireAuth, requireService('cable'), async (req, res) => {
+  const { provider: cable, variation_code } = req.body;
   const smartcardNumber = String(req.body.smartcardNumber || '').trim();
   const phone = cleanPhone(req.body.phone);
-  if (!CABLES.includes(provider) || !smartcardNumber || !variation_code || !phone) {
+  if (!CABLES.includes(cable) || !smartcardNumber || !variation_code || !phone) {
     return res.status(400).json({ error: 'Provider, smartcard number, bouquet and phone are required.' });
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
+  const s = await getSettings();
+  if (s.disabledCables.includes(cable)) return unavailable(res, `${cable.toUpperCase()} is currently unavailable.`);
 
-  const plans = await provider.getVariations('cable', provider);
-  const plan = plans.find((p) => p.variation_code === variation_code);
-  if (!plan) return res.status(400).json({ error: 'That bouquet is no longer available. Please pick another.' });
+  const plans = await provider.getVariations('cable', cable);
+  const plan = plans.find((p) => p.variation_code === String(variation_code));
+  if (!plan || s.disabledPlans.includes(`cable:${plan.variation_code}`)) {
+    return res.status(400).json({ error: 'That bouquet is no longer available. Please pick another.' });
+  }
 
   const pricing = await getOrCreatePricing();
-  await chargeAndPurchase({
-    req, res, kind: 'cable',
+  await dispatch(req, res, {
+    kind: 'cable',
     price: applyMarkup(plan.amount, pricing.cable.markupPercent),
-    description: `${provider.toUpperCase()} ${plan.name} - card ${smartcardNumber}`,
-    payload: { provider, smartcardNumber, variation_code, phone, planName: plan.name, planAmount: plan.amount, customerName: req.body.customerName || null }
+    description: `${cable.toUpperCase()} ${plan.name} - card ${smartcardNumber}`,
+    payload: { provider: cable, smartcardNumber, variation_code: plan.variation_code, phone, planName: plan.name, planAmount: plan.amount, customerName: req.body.customerName || null }
   });
 });
 
 // ---- Exam pins ----
-router.post('/exam', requireAuth, async (req, res) => {
+router.post('/exam', requireAuth, requireService('exam'), async (req, res) => {
   const { variation_code } = req.body;
   const phone = cleanPhone(req.body.phone);
   const quantity = Math.min(Math.max(parseInt(req.body.quantity, 10) || 1, 1), 5);
@@ -237,23 +252,19 @@ router.post('/exam', requireAuth, async (req, res) => {
   }
   if (!validPhone(phone)) return res.status(400).json({ error: 'Enter a valid Nigerian phone number.' });
 
+  const s = await getSettings();
   const plans = await provider.getVariations('exam');
-  const plan = plans.find((p) => p.variation_code === variation_code && (!req.body.examBody || p.serviceID === req.body.examBody));
-  if (!plan) return res.status(400).json({ error: 'Exam PINs are not available right now.' });
-  if (plan.needsProfile && !req.body.profileId) {
-    return res.status(400).json({ error: 'Enter the JAMB profile code for this PIN.' });
+  const plan = plans.find((p) => p.variation_code === String(variation_code));
+  if (!plan || s.disabledPlans.includes(`exam:${plan.variation_code}`)) {
+    return res.status(400).json({ error: 'Exam PINs are not available right now.' });
   }
 
   const pricing = await getOrCreatePricing();
-  await chargeAndPurchase({
-    req, res, kind: 'exam',
-    price: (plan.amount + pricing.exam.flatFee) * quantity,
+  await dispatch(req, res, {
+    kind: 'exam',
+    price: round2((plan.amount + pricing.exam.flatFee) * quantity),
     description: `${plan.name} x${quantity}`,
-    payload: {
-      examBody: plan.serviceID, variation_code, phone, quantity,
-      planName: plan.name, planAmount: plan.amount,
-      billersCode: plan.needsProfile ? String(req.body.profileId).trim() : undefined
-    }
+    payload: { variation_code: plan.variation_code, phone, quantity, planName: plan.name, planAmount: plan.amount }
   });
 });
 

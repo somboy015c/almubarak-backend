@@ -1,30 +1,32 @@
-// Arrifqubundle integration: airtime, data, electricity, cable TV, customer
-// verification, transaction re-query and the provider wallet balance.
+// Arrifqubundle integration: airtime, data, electricity, cable TV, exam PINs,
+// customer verification, order look-up and the provider wallet balance.
 //
 // PROVIDER_MODE=mock -> simulated responses, no provider account needed.
 // PROVIDER_MODE=live -> real calls using ARRIFQU_API_KEY.
 //
-// API (from Arrifqubundle's documentation): header  Authorization: Token <key>
-//   GET  /api/user/                        account details (+ plan catalog)
-//   POST /api/data/        {network, mobile_number, plan, Ported_number}
+// Endpoints (Arrifqubundle documentation): header  Authorization: Token <key>
+//   GET  /api/user/                        account details + plans (data, cable)
+//   GET  /api/v1/base/                     public catalogue: network, cable, disco, exam (with IDs)
+//   POST /api/data/        {network, mobile_number, plan, Ported_number, customer_ref}
 //   POST /api/topup/       {network, amount, mobile_number, Ported_number, airtime_type}
 //   POST /api/billpayment/ {disco_name, amount, meter_number, MeterType (1 prepaid, 2 postpaid)}
 //   POST /api/cablesub/    {cablename, cableplan, smart_card_number}
-//   GET  /api/{data|topup|billpayment|cablesub}/{id}   look up one transaction
+//   POST /api/epin/        {exam_name, quantity}                 (see note)
+//   GET  /api/{data|topup|billpayment|cablesub|epin}/{id}        look up one order
 //   GET  /api/validateiuc?smart_card_number=..&cablename=..
 //   GET  /api/validatemeter?meternumber=..&disconame=..&mtype=..
 //
-// Arrifqubundle's own documentation lists the endpoints above but not the ID
-// lists or response layouts. ASBData (same software family) documents these
-// extra calls, which this adapter tries and falls back from if they don't exist:
-//   GET  /api/v1/base/   public catalogue: network, cable, disco, exam lists with IDs
-//   GET  /api/network/   data plans      GET /api/cable/   cable packages
-//   POST /api/epin/      {exam_name, quantity}   exam PINs
-// Confirm everything with the "Provider check" button in the admin panel
-// (Overview) before going live.
+// Everything the app shows (networks, plans, discos, cable packages, exam PINs
+// and their IDs and prices) comes from the provider's own catalogue. There are
+// no hard-coded ID tables: if an ID can't be found the service refuses to run
+// instead of guessing.
+//
+// Not yet confirmed against a real order: the exam-PIN purchase call (/api/epin/,
+// documented by ASBData, same software family) and the exact wording of order
+// statuses. Exam PINs therefore start switched OFF in the admin panel.
 
 const axios = require('axios');
-const { generateRef } = require('../utils/helpers');
+const { generateRef, round2 } = require('../utils/helpers');
 
 const isLive = () => process.env.PROVIDER_MODE === 'live';
 const baseURL = () => (process.env.ARRIFQU_BASE_URL || 'https://www.arrifqubundle.com/api').replace(/\/+$/, '');
@@ -36,54 +38,61 @@ const client = () =>
     headers: { Authorization: `Token ${process.env.ARRIFQU_API_KEY}`, 'Content-Type': 'application/json' }
   });
 
-// ---- Fallback ID maps (used only when the provider's catalog doesn't list them) ----
-const FALLBACK_NETWORK = { mtn: 1, glo: 2, '9mobile': 3, airtel: 4 };
-const FALLBACK_CABLE = { dstv: 1, gotv: 2, startimes: 3 };
-const FALLBACK_DISCO = {
-  'ikeja-electric': 1, 'eko-electric': 2, 'abuja-electric': 3, 'kano-electric': 4, 'enugu-electric': 5,
-  'portharcourt-electric': 6, 'ibadan-electric': 7, 'kaduna-electric': 8, 'jos-electric': 9,
-  'yola-electric': 10, 'benin-electric': 11, 'aba-electric': 12
-};
-// Arrifqubundle's docs: MeterType PREPAID=1, POSTPAID=2. ASBData's docs use the words
-// "Prepaid"/"Postpaid" instead. Set ARRIFQU_METERTYPE_STYLE=name if orders are rejected for MeterType.
-const meterTypeValue = (t) => {
-  const type = t === 'postpaid' ? 'postpaid' : 'prepaid';
-  if (process.env.ARRIFQU_METERTYPE_STYLE === 'name') return type === 'postpaid' ? 'Postpaid' : 'Prepaid';
-  return type === 'postpaid' ? 2 : 1;
-};
+const METER_TYPE = { prepaid: 1, postpaid: 2 }; // "meter type id (PREPAID:1, POSTPAID:2)" per the provider docs
 const PATH = { airtime: 'topup', data: 'data', electricity: 'billpayment', cable: 'cablesub', exam: 'epin' };
 
-// Optional overrides from the environment, e.g. ARRIFQU_DISCO_IDS={"ikeja-electric":1,...}
-function envMap(name, fallback) {
+// ---- Small helpers ----
+const num = (v) => {
+  const n = parseFloat(String(v ?? '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? n : NaN;
+};
+const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const errorText = (data) => {
   try {
-    return { ...fallback, ...JSON.parse(process.env[name] || '{}') };
+    return typeof data === 'string' ? data : JSON.stringify(data);
+  } catch (e) {
+    return '';
+  }
+};
+
+function envMap(name) {
+  try {
+    return JSON.parse(process.env[name] || '{}');
   } catch (e) {
     console.error(`${name} is not valid JSON, ignoring it.`);
-    return fallback;
+    return {};
   }
 }
 
-// ---- Mock catalog (PROVIDER_MODE=mock) ----
-const MOCK_CATALOG = {
+// ---- Mock catalogue (PROVIDER_MODE=mock) ----
+const MOCK = {
+  discos: [
+    { id: '1', name: 'Ikeja Electric' },
+    { id: '2', name: 'Eko Electric' },
+    { id: '3', name: 'Abuja Electric' },
+    { id: '6', name: 'Port Harcourt Electric' }
+  ],
   data: {
     mtn: [
-      { variation_code: '101', name: 'MTN 500MB SME - 30 days', amount: 140 },
-      { variation_code: '102', name: 'MTN 1GB SME - 30 days', amount: 270 },
-      { variation_code: '103', name: 'MTN 2GB SME - 30 days', amount: 540 },
-      { variation_code: '104', name: 'MTN 5GB SME - 30 days', amount: 1350 }
+      { variation_code: '101', name: '500MB - 2days', amount: 250, category: 'SME', validity: '2days', size: '500MB' },
+      { variation_code: '102', name: '1GB - 7days', amount: 500, category: 'SME', validity: '7days', size: '1GB' },
+      { variation_code: '103', name: '2GB - 30days', amount: 1400, category: 'GIFTING', validity: '30days', size: '2GB' },
+      { variation_code: '104', name: '5GB - 30days', amount: 3500, category: 'GIFTING', validity: '30days', size: '5GB' },
+      { variation_code: '105', name: '1GB - 1Month', amount: 700, category: 'CORPORATE GIFTING', validity: '1Month', size: '1GB' },
+      { variation_code: '106', name: '75MB - 1day', amount: 75, category: 'SME2', validity: '1day', size: '75MB' }
     ],
     airtel: [
-      { variation_code: '201', name: 'Airtel 1GB - 7 days', amount: 300 },
-      { variation_code: '202', name: 'Airtel 3GB - 30 days', amount: 1000 },
-      { variation_code: '203', name: 'Airtel 10GB - 30 days', amount: 3000 }
+      { variation_code: '201', name: '150MB - 1day', amount: 70, category: 'AWOOF', validity: '1day', size: '150MB' },
+      { variation_code: '202', name: '3GB - 7days', amount: 1000, category: 'AWOOF', validity: '7days', size: '3GB' },
+      { variation_code: '203', name: '10GB - 30days', amount: 3000, category: 'CORPORATE GIFTING', validity: '30days', size: '10GB' }
     ],
     glo: [
-      { variation_code: '301', name: 'Glo 1.6GB - 30 days', amount: 450 },
-      { variation_code: '302', name: 'Glo 5GB - 30 days', amount: 1500 }
+      { variation_code: '301', name: '1.6GB - 30days', amount: 450, category: 'CORPORATE GIFTING', validity: '30days', size: '1.6GB' },
+      { variation_code: '302', name: '750MB - 1day', amount: 200, category: 'AWOOF', validity: '1day', size: '750MB' }
     ],
     '9mobile': [
-      { variation_code: '401', name: '9mobile 1.5GB - 30 days', amount: 1000 },
-      { variation_code: '402', name: '9mobile 4.5GB - 30 days', amount: 2000 }
+      { variation_code: '401', name: '500MB - 30days', amount: 250, category: 'CORPORATE GIFTING', validity: '30days', size: '500MB' },
+      { variation_code: '402', name: '1GB - 30days', amount: 500, category: 'CORPORATE GIFTING', validity: '30days', size: '1GB' }
     ]
   },
   cable: {
@@ -93,38 +102,19 @@ const MOCK_CATALOG = {
       { variation_code: '503', name: 'DStv Compact', amount: 19000 }
     ],
     gotv: [
-      { variation_code: '511', name: 'GOtv Smallie', amount: 1900 },
-      { variation_code: '512', name: 'GOtv Jinja', amount: 3900 },
-      { variation_code: '513', name: 'GOtv Max', amount: 8500 }
+      { variation_code: '511', name: 'GOtv Smallie - Monthly', amount: 1900 },
+      { variation_code: '512', name: 'GOtv Jinja-Monthly', amount: 3900 }
     ],
     startimes: [
-      { variation_code: '521', name: 'Startimes Nova', amount: 1900 },
-      { variation_code: '522', name: 'Startimes Basic', amount: 4200 }
+      { variation_code: '521', name: 'Nova - 700 Naira - 1 Week', amount: 700 },
+      { variation_code: '522', name: 'Smart - 1,400 Naira - 1 Week', amount: 1400 }
     ]
   },
   exam: [
-    { serviceID: 'WAEC', variation_code: 'WAEC', name: 'WAEC Result Checker PIN', amount: 3500 },
-    { serviceID: 'NECO', variation_code: 'NECO', name: 'NECO Result Checker PIN', amount: 1300 }
+    { serviceID: 'WAEC', variation_code: 'WAEC', name: 'WAEC Result Checker PIN', amount: 5150 },
+    { serviceID: 'NECO', variation_code: 'NECO', name: 'NECO Result Checker PIN', amount: 2250 }
   ]
 };
-
-// ---- Small helpers ----
-const num = (v) => {
-  const n = parseFloat(String(v ?? '').replace(/[^0-9.]/g, ''));
-  return Number.isFinite(n) ? n : NaN;
-};
-const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// Walk any nested object/array and collect every array of objects found.
-function collectArrays(node, out = []) {
-  if (Array.isArray(node)) {
-    if (node.length && typeof node[0] === 'object') out.push(node);
-    node.forEach((n) => collectArrays(n, out));
-  } else if (node && typeof node === 'object') {
-    Object.values(node).forEach((v) => collectArrays(v, out));
-  }
-  return out;
-}
 
 // ---- Cached reads from the provider ----
 const cache = {};
@@ -136,92 +126,74 @@ async function cached(key, loader, ttlMs = 5 * 60 * 1000, force = false) {
   return data;
 }
 
-// /api/user/: account details (+ possibly plans on some installs)
-const getCatalog = (force = false) => cached('user', async () => (await client().get('/user/')).data, 5 * 60 * 1000, force);
+// /api/user/: account details + Dataplans + Cableplan
+const getUser = (force = false) => cached('user', async () => (await client().get('/user/')).data, 5 * 60 * 1000, force);
 
-// /api/v1/base/: public catalogue of IDs (network, cable, disco, exam). May not exist.
-async function getBase() {
+// /api/v1/base/: public catalogue of networks, cable, discos and exam PINs
+async function getBase(force = false) {
   try {
     return await cached('base', async () => {
       const { data } = await axios.get(`${baseURL()}/v1/base/`, { timeout: 20000 });
       if (!data || typeof data !== 'object') throw new Error('not json');
       return data;
-    }, 10 * 60 * 1000);
+    }, 10 * 60 * 1000, force);
   } catch (e) {
     return null;
   }
 }
 
-// Optional dedicated plan lists (/network/ and /cable/). Fall back to /user/.
-async function getPlanSource(kind) {
-  const path = kind === 'data' ? '/network/' : '/cable/';
-  try {
-    return await cached(`plans:${kind}`, async () => (await client().get(path)).data);
-  } catch (e) {
-    const cat = await getCatalog();
-    return kind === 'data' ? cat.Dataplans || cat.dataplans || cat.DataPlans || cat : cat.Cableplan || cat.cableplan || cat.CablePlan || cat;
-  }
-}
+const userType = (user) => user?.user?.user_type || user?.user_type || null;
 
-// Find an item {id, name} in a catalogue list whose name contains the brand.
-function findInLists(sources, keyPattern, brand) {
-  for (const src of sources) {
-    if (!src || typeof src !== 'object') continue;
-    for (const [key, value] of Object.entries(src)) {
-      if (!keyPattern.test(key) || !Array.isArray(value)) continue;
-      const hit = value.find((item) => {
-        const label = norm(Object.entries(item).filter(([k]) => k !== 'id').map(([, v]) => v).join(' '));
-        return label.includes(norm(brand));
-      });
-      if (hit && hit.id !== undefined) return hit;
-    }
-  }
+// ---- IDs (from the catalogue only) ----
+const NETWORK_KEY = { mtn: 'MTN', glo: 'GLO', airtel: 'AIRTEL', '9mobile': '9MOBILE' };
+const CABLE_KEY = { dstv: 'DSTV', gotv: 'GOTV', startimes: 'STARTIME' };
+
+async function networkEntry(network) {
+  const key = NETWORK_KEY[String(network).toLowerCase()];
+  if (!key) return null;
+  const override = envMap('ARRIFQU_NETWORK_IDS')[String(network).toLowerCase()];
+  const base = await getBase();
+  const hit = (base?.network || []).find((n) => norm(n.name) === norm(key));
+  if (override !== undefined) return { id: override, entry: hit || null };
+  if (hit && hit.id !== undefined) return { id: hit.id, entry: hit };
+  // fall back to the network id carried by that network's own plans
+  const user = await getUser().catch(() => null);
+  const plans = user?.Dataplans?.[`${key}_PLAN`];
+  const sample = plans && (plans.ALL?.[0] || Object.values(plans).flat()[0]);
+  if (sample && sample.network !== undefined) return { id: sample.network, entry: null };
   return null;
 }
 
-async function lookup(kind, key) {
-  // kind: 'network' | 'cable' | 'disco'
-  const k = String(key).toLowerCase();
-  const cfg = {
-    network: { env: 'ARRIFQU_NETWORK_IDS', fallback: FALLBACK_NETWORK, pattern: /^network/i, brand: k },
-    cable: { env: 'ARRIFQU_CABLE_IDS', fallback: FALLBACK_CABLE, pattern: /^cable$|^cables$|^cablename/i, brand: k === 'startimes' ? 'startime' : k },
-    disco: { env: 'ARRIFQU_DISCO_IDS', fallback: FALLBACK_DISCO, pattern: /disco/i, brand: k.split('-')[0] }
-  }[kind];
-
-  const overrides = envMap(cfg.env, {});
-  if (overrides[k] !== undefined) return { id: overrides[k], name: null };
-
-  try {
-    const base = await getBase();
-    const cat = base ? null : await getCatalog().catch(() => null);
-    const hit = findInLists([base, cat], cfg.pattern, cfg.brand);
-    if (hit) return { id: hit.id, name: hit.name || null };
-  } catch (e) { /* use fallback */ }
-  return { id: cfg.fallback[k], name: null };
+async function cableEntry(provider) {
+  const key = CABLE_KEY[String(provider).toLowerCase()];
+  if (!key) return null;
+  const override = envMap('ARRIFQU_CABLE_IDS')[String(provider).toLowerCase()];
+  const base = await getBase();
+  const hit = (base?.cable || []).find((c) => norm(c.name) === norm(key));
+  if (override !== undefined) return { id: override, entry: hit || null };
+  if (hit && hit.id !== undefined) return { id: hit.id, entry: hit };
+  const user = await getUser().catch(() => null);
+  const fromUser = (user?.Cableplan?.cablename || []).find((c) => norm(c.name) === norm(key));
+  return fromUser ? { id: fromUser.id, entry: null } : null;
 }
 
-const networkId = async (n) => (await lookup('network', n)).id;
-const cableId = async (c) => (await lookup('cable', c)).id;
-const discoId = async (d) => (await lookup('disco', d)).id;
-
-// ---- Catalog: data plans & cable bouquets ----
-function planLabel(p) {
-  const base = p.plan_name || p.plan || p.package || p.name || p.cableplan || 'Plan';
-  const parts = [p.plan_network && !String(base).toUpperCase().includes(String(p.plan_network).toUpperCase()) ? p.plan_network : null, base];
-  const type = p.plan_type && !String(base).toUpperCase().includes(String(p.plan_type).toUpperCase()) ? p.plan_type : null;
-  const validity = p.month_validate || p.validity || null;
-  return [parts.filter(Boolean).join(' '), type, validity].filter(Boolean).join(' - ');
+async function getDiscos() {
+  if (!isLive()) return MOCK.discos;
+  const base = await getBase();
+  return (base?.disco || []).filter((d) => d && d.id !== undefined).map((d) => ({ id: String(d.id), name: String(d.name) }));
 }
+
+// ---- Catalogue: data plans, cable packages, exam PINs ----
+const tidySize = (s) => String(s ?? '').replace(/\.0+(?=[A-Za-z])/g, '').trim();
 
 async function getVariations(kind, providerName) {
   if (!isLive()) {
-    if (kind === 'exam') return MOCK_CATALOG.exam;
-    return MOCK_CATALOG[kind]?.[providerName] || [];
+    if (kind === 'exam') return MOCK.exam;
+    return MOCK[kind]?.[providerName] || [];
   }
 
   try {
     if (kind === 'exam') {
-      // Offered only if the provider's public catalogue lists exam pins.
       const base = await getBase();
       return (base?.exam || [])
         .filter((e) => e && e.exam_name && num(e.amount) > 0)
@@ -229,44 +201,57 @@ async function getVariations(kind, providerName) {
     }
 
     if (kind === 'data') {
-      const id = await networkId(providerName);
-      const brand = norm(providerName);
-      const source = await getPlanSource('data');
-      const plans = collectArrays(source).flat().filter((p) => p && (p.plan_amount !== undefined || p.amount !== undefined));
-      return plans
-        .filter((p) => {
-          const byName = p.plan_network && norm(p.plan_network).includes(brand);
-          const byId = id !== undefined && id !== null && String(p.network) === String(id);
-          return byName || byId;
-        })
-        .map((p) => ({ variation_code: String(p.id), name: planLabel(p), amount: num(p.plan_amount ?? p.amount) }))
-        .filter((p) => p.variation_code && Number.isFinite(p.amount) && p.amount > 0);
+      const key = NETWORK_KEY[String(providerName).toLowerCase()];
+      if (!key) return [];
+      const user = await getUser();
+      const group = user?.Dataplans?.[`${key}_PLAN`];
+      if (!group) return [];
+      const type = userType(user);
+      // "ALL" repeats every plan that is also listed in its own category: read one list, then de-duplicate by id.
+      const list = Array.isArray(group.ALL) ? group.ALL : Object.values(group).flat();
+      const seen = new Set();
+      const plans = [];
+      for (const p of list) {
+        if (!p || p.id === undefined || seen.has(p.id)) continue;
+        seen.add(p.id);
+        const validity = String(p.month_validate ?? '').trim();
+        if (/not\s*available/i.test(validity)) continue; // the provider itself marks these as unavailable
+        const price = num((type && p[`${type}_price`]) ?? p.plan_amount);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        const size = tidySize(p.plan);
+        plans.push({
+          variation_code: String(p.id),
+          name: [size, validity].filter(Boolean).join(' - '),
+          amount: round2(price),
+          category: String(p.plan_type || 'OTHER').toUpperCase(),
+          validity,
+          size
+        });
+      }
+      return plans.sort((a, b) => a.amount - b.amount);
     }
 
     if (kind === 'cable') {
-      const id = await cableId(providerName);
-      const brand = norm(providerName === 'startimes' ? 'startime' : providerName);
-      const source = await getPlanSource('cable');
-      const plans = collectArrays(source).flat().filter((p) => p && (p.plan_amount !== undefined || p.amount !== undefined));
-      return plans
-        .filter((p) => {
-          const byId = typeof (p.cable ?? p.cablename) === 'number' && id !== undefined && id !== null && String(p.cable ?? p.cablename) === String(id);
-          const byName = norm(p.cable_name || p.cablename || p.cable || p.package || '').includes(brand);
-          return byId || byName;
-        })
-        .map((p) => ({ variation_code: String(p.id), name: planLabel(p), amount: num(p.plan_amount ?? p.amount) }))
-        .filter((p) => p.variation_code && Number.isFinite(p.amount) && p.amount > 0);
+      const c = await cableEntry(providerName);
+      if (!c) return [];
+      let list = c.entry?.cableplan;
+      if (!Array.isArray(list)) {
+        const user = await getUser();
+        list = user?.Cableplan?.[`${CABLE_KEY[String(providerName).toLowerCase()]}PLAN`] || [];
+      }
+      return list
+        .filter((p) => p && p.id !== undefined && num(p.plan_amount) > 0)
+        .map((p) => ({ variation_code: String(p.id), name: String(p.package).trim(), amount: round2(num(p.plan_amount)) }))
+        .sort((a, b) => a.amount - b.amount);
     }
   } catch (err) {
-    console.error('Arrifqubundle catalog error:', err.response?.status, JSON.stringify(err.response?.data) || err.message);
+    console.error('Arrifqubundle catalog error:', err.response?.status, errorText(err.response?.data) || err.message);
   }
   return [];
 }
 
 // ---- Customer verification (meter number / smartcard) ----
-function readName(d) {
-  return d?.name || d?.Customer_Name || d?.customer_name || d?.customerName || d?.account_name || '';
-}
+const readName = (d) => d?.name || d?.Customer_Name || d?.customer_name || d?.customerName || d?.account_name || '';
 
 async function tryValidate(path, params) {
   try {
@@ -280,35 +265,34 @@ async function tryValidate(path, params) {
   }
 }
 
-// Arrifqubundle's docs pass IDs (disconame=1, cablename=2); ASBData's docs pass
-// names (disconame=Ikeja Electric, cablename=DSTV). Try IDs first, then names.
-async function verifyCustomer({ kind, disco, meterType, meter, provider, smartcardNumber }) {
+// The documentation shows IDs (disconame=1, cablename=2); a sister provider documents
+// names instead. Both are read-only lookups, so try IDs first and names second.
+async function verifyCustomer({ kind, discoId, discoName, meterType, meter, provider, smartcardNumber }) {
   if (!isLive()) {
     await new Promise((r) => setTimeout(r, 400));
-    return { ok: true, customerName: 'MOCK CUSTOMER', details: {} };
+    return { ok: true, customerName: 'MOCK CUSTOMER', details: {}, style: 'mock' };
   }
 
   const fail = { ok: false, message: 'We could not verify those details. Please check the number and try again.' };
   try {
     if (kind === 'electricity') {
-      const d = await lookup('disco', disco);
-      if (d.id === undefined || d.id === null) return { ok: false, message: 'That electricity provider is not available right now.' };
-      const typeName = meterType === 'postpaid' ? 'Postpaid' : 'Prepaid';
-      return (
-        (await tryValidate('/validatemeter', { meternumber: meter, disconame: d.id, mtype: meterType === 'postpaid' ? 2 : 1 })) ||
-        (d.name && (await tryValidate('/validatemeter', { meternumber: meter, disconame: d.name, mtype: typeName }))) ||
-        fail
-      );
+      if (discoId === undefined || discoId === null || discoId === '') return { ok: false, message: 'Choose a distribution company.' };
+      const byId = await tryValidate('/validatemeter', { meternumber: meter, disconame: discoId, mtype: METER_TYPE[meterType] || 1 });
+      if (byId) return { ...byId, style: 'id' };
+      if (discoName) {
+        const byName = await tryValidate('/validatemeter', { meternumber: meter, disconame: discoName, mtype: meterType === 'postpaid' ? 'Postpaid' : 'Prepaid' });
+        if (byName) return { ...byName, style: 'name' };
+      }
+      return fail;
     }
     if (kind === 'cable') {
-      const c = await lookup('cable', provider);
-      if (c.id === undefined || c.id === null) return { ok: false, message: 'That cable provider is not available right now.' };
-      const nameGuess = c.name || (provider === 'startimes' ? 'STARTIME' : String(provider).toUpperCase());
-      return (
-        (await tryValidate('/validateiuc', { smart_card_number: smartcardNumber, cablename: c.id })) ||
-        (await tryValidate('/validateiuc', { smart_card_number: smartcardNumber, cablename: nameGuess })) ||
-        fail
-      );
+      const c = await cableEntry(provider);
+      if (!c) return { ok: false, message: 'That cable provider is not available right now.' };
+      const byId = await tryValidate('/validateiuc', { smart_card_number: smartcardNumber, cablename: c.id });
+      if (byId) return { ...byId, style: 'id' };
+      const byName = await tryValidate('/validateiuc', { smart_card_number: smartcardNumber, cablename: c.entry?.name || CABLE_KEY[provider] });
+      if (byName) return { ...byName, style: 'name' };
+      return fail;
     }
     return { ok: false, message: 'Verification is not available for this service.' };
   } catch (err) {
@@ -322,12 +306,11 @@ async function verifyCustomer({ kind, disco, meterType, meter, provider, smartca
 // failure. Anything else (processing, unknown) is pending, and the wallet is
 // NOT refunded until the provider confirms failure.
 function interpret(data) {
-  // The provider can answer 200 with plain text "Forbidden." when the account has an
-  // allowed-IP rule and this server's IP isn't on it. Nothing was bought in that case.
+  // Plain-text "Forbidden." means the account's allowed-IP rule refused this server. Nothing was bought.
   if (typeof data === 'string') {
     if (/forbidden/i.test(data)) {
       console.error('Provider replied "Forbidden": add this server\'s outbound IPs to the allowed IP list in your provider account (or remove the IP lock).');
-      return { state: 'failed', message: 'This service is temporarily unavailable. Please try again shortly.', providerId: null, token: null, cards: null, raw: data };
+      return { state: 'failed', code: 'FORBIDDEN', message: 'This service is temporarily unavailable. Please try again shortly.', providerId: null, token: null, cards: null, raw: data };
     }
     return { state: 'pending', message: 'Your order is being processed.', providerId: null, token: null, cards: null, raw: data };
   }
@@ -353,14 +336,6 @@ function interpret(data) {
   return { state: 'pending', message: 'Your order is being processed.', ...extra };
 }
 
-function errorText(data) {
-  try {
-    return typeof data === 'string' ? data : JSON.stringify(data);
-  } catch (e) {
-    return '';
-  }
-}
-
 // ---- Purchase ----
 // `payload` shape depends on `kind`; see routes/services.js.
 async function purchase(kind, payload) {
@@ -381,30 +356,43 @@ async function purchase(kind, payload) {
       message: 'Transaction successful',
       providerRef: `MOCK-${request_id}`,
       providerId: null,
-      token: kind === 'electricity' ? 'Token : 1234-5678-9012-3456-7890' : null
+      token: kind === 'electricity' ? 'Token : 1234-5678-9012-3456-7890' : kind === 'exam' ? 'PIN : 1234567890' : null
     };
   }
 
   if (!process.env.ARRIFQU_API_KEY) {
     console.error('ARRIFQU_API_KEY is not set.');
-    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.' };
+    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.', logMessage: 'ARRIFQU_API_KEY is not set' };
   }
 
   let body;
   try {
     switch (kind) {
-      case 'airtime':
-        body = { network: await networkId(payload.network), amount: payload.amount, mobile_number: payload.phone, Ported_number: true, airtime_type: 'VTU' };
+      case 'airtime': {
+        const n = await networkEntry(payload.network);
+        if (!n) throw new Error('network id not found');
+        const types = (n.entry?.airtime_type || []).map((t) => t.value || t.name).filter(Boolean);
+        const airtimeType = types.find((t) => String(t).toUpperCase() === 'VTU') || types[0];
+        if (!airtimeType) throw new Error('no airtime type offered for this network');
+        body = { network: n.id, amount: payload.amount, mobile_number: payload.phone, Ported_number: true, airtime_type: airtimeType };
         break;
-      case 'data':
-        body = { network: await networkId(payload.network), mobile_number: payload.phone, plan: Number(payload.variation_code) || payload.variation_code, Ported_number: true, customer_ref: request_id };
+      }
+      case 'data': {
+        const n = await networkEntry(payload.network);
+        if (!n) throw new Error('network id not found');
+        body = { network: n.id, mobile_number: payload.phone, plan: Number(payload.variation_code) || payload.variation_code, Ported_number: true, customer_ref: request_id };
         break;
+      }
       case 'electricity':
-        body = { disco_name: await discoId(payload.disco), amount: payload.amount, meter_number: payload.meter, MeterType: meterTypeValue(payload.variation_code), Customer_Phone: payload.phone };
+        if (payload.discoId === undefined || payload.discoId === null || payload.discoId === '') throw new Error('disco id missing');
+        body = { disco_name: Number(payload.discoId) || payload.discoId, amount: payload.amount, meter_number: payload.meter, MeterType: METER_TYPE[payload.variation_code] || 1, Customer_Phone: payload.phone };
         break;
-      case 'cable':
-        body = { cablename: await cableId(payload.provider), cableplan: Number(payload.variation_code) || payload.variation_code, smart_card_number: payload.smartcardNumber };
+      case 'cable': {
+        const c = await cableEntry(payload.provider);
+        if (!c) throw new Error('cable id not found');
+        body = { cablename: c.id, cableplan: Number(payload.variation_code) || payload.variation_code, smart_card_number: payload.smartcardNumber };
         break;
+      }
       case 'exam':
         body = { exam_name: payload.variation_code, quantity: payload.quantity || 1 };
         break;
@@ -412,13 +400,8 @@ async function purchase(kind, payload) {
         return { ok: false, state: 'failed', request_id, message: 'This service is not available right now.' };
     }
   } catch (err) {
-    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.' };
-  }
-
-  const missingId = Object.entries(body).find(([k, v]) => ['network', 'disco_name', 'cablename'].includes(k) && (v === undefined || v === null));
-  if (missingId) {
-    console.error(`Arrifqubundle: no ID known for ${kind} (${missingId[0]}). Check the Provider check page / ID overrides.`);
-    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.' };
+    console.error(`Arrifqubundle: cannot build ${kind} order:`, err.message);
+    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.', logMessage: err.message };
   }
 
   try {
@@ -443,16 +426,18 @@ async function purchase(kind, payload) {
           ? 'Too many orders at once. Please wait a minute and try again. You have not been charged.'
           : lowFunds
             ? 'This service is temporarily unavailable. Please try again shortly.'
-            : 'Transaction failed. You have not been charged.'
+            : 'Transaction failed. You have not been charged.',
+        logMessage: `HTTP ${status}: ${text.slice(0, 300)}`,
+        raw: err.response.data
       };
     }
     // Timeout / network drop / 5xx: the order MAY have gone through. Don't refund yet.
     console.error('Arrifqubundle purchase: unclear outcome, marking pending:', status || err.message);
-    return { ok: false, state: 'pending', request_id, message: 'Your order is being processed.' };
+    return { ok: false, state: 'pending', request_id, message: 'Your order is being processed.', logMessage: `No clear answer (${status || err.message})` };
   }
 }
 
-// ---- Look up a transaction by the provider's own id ----
+// ---- Look up an order by the provider's own id ----
 async function requery(kind, providerId) {
   if (!isLive()) return { state: 'success', message: 'Transaction successful' };
   if (!PATH[kind] || !providerId) return { state: 'pending', message: 'Still processing.' };
@@ -480,30 +465,15 @@ async function findByRef(kind, ref) {
 }
 
 // ---- Provider wallet balance (shown in the admin dashboard) ----
-function findBalance(obj) {
-  const seen = [];
-  (function walk(o, depth) {
-    if (!o || typeof o !== 'object' || depth > 3) return;
-    for (const [k, v] of Object.entries(o)) {
-      if (/balance/i.test(k) && !/before|after/i.test(k) && Number.isFinite(num(v)) && v !== null && typeof v !== 'object') {
-        seen.push({ k, v, depth });
-      } else if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, depth + 1);
-    }
-  })(obj, 0);
-  if (!seen.length) return NaN;
-  const preferred = seen.find((s) => /account_?balance/i.test(s.k)) || seen[0];
-  return num(preferred.v);
-}
-
 async function getBalance() {
   if (!isLive()) return { ok: true, balance: 250000, mock: true };
   try {
-    const data = await getCatalog(true);
-    const balance = findBalance(data?.user ?? data);
+    const data = await getUser(true);
+    const balance = num(data?.user?.Account_Balance);
     if (!Number.isFinite(balance)) {
-      return { ok: false, message: 'Connected, but could not find the balance in the provider response. Use "Provider check" and send me the result.' };
+      return { ok: false, message: 'Connected, but the balance (Account_Balance) was not in the provider response.' };
     }
-    return { ok: true, balance };
+    return { ok: true, balance: round2(balance) };
   } catch (err) {
     console.error('Arrifqubundle balance error:', err.response?.status, errorText(err.response?.data) || err.message);
     const status = err.response?.status;
@@ -520,7 +490,7 @@ function summarise(node, depth = 0) {
   if (node && typeof node === 'object') {
     if (depth > 4) return '{...}';
     return Object.fromEntries(
-      Object.entries(node).map(([k, v]) => [k, /token|password|secret|key|pin/i.test(k) ? '[hidden]' : summarise(v, depth + 1)])
+      Object.entries(node).map(([k, v]) => [k, /token|password|secret|key|pin|email|phone|address|bank|account|referer|username|fullname/i.test(k) ? '[hidden]' : summarise(v, depth + 1)])
     );
   }
   return node;
@@ -529,28 +499,30 @@ function summarise(node, depth = 0) {
 async function diagnostics() {
   if (!isLive()) return { mode: 'mock', note: 'Set PROVIDER_MODE=live and ARRIFQU_API_KEY to inspect the real provider response.' };
   try {
-    const user = await getCatalog(true);
-    const base = await getBase();
+    const user = await getUser(true);
+    const base = await getBase(true);
     const warnings = [];
-    if (!base) warnings.push('Public catalogue /v1/base/ not available: IDs come from /user/ or fallback guesses. Verify them below.');
-    else if (!(base.exam || []).length) warnings.push('Exam PINs not listed by the provider: that service stays "Coming soon".');
-    const userType = user?.user_type || user?.user?.user_type || null;
-    if (userType && String(userType).toUpperCase() !== 'API') {
-      warnings.push(`Account type is "${userType}". Some providers allow only 1 purchase per minute unless the account type is API. Ask support if customers hit "Too many requests".`);
+    if (!base) warnings.push('Public catalogue /v1/base/ is not available: electricity companies and exam PINs cannot be offered.');
+    const type = userType(user);
+    if (type && String(type).toUpperCase() !== 'API') {
+      warnings.push(`Account type is "${type}". Some providers allow only 1 purchase per minute unless the account type is API. Ask support if customers hit "Too many requests".`);
     }
+    const ids = {};
+    for (const n of Object.keys(NETWORK_KEY)) ids[n] = (await networkEntry(n))?.id ?? null;
+    const cableIds = {};
+    for (const c of Object.keys(CABLE_KEY)) cableIds[c] = (await cableEntry(c))?.id ?? null;
     return {
       mode: 'live',
       baseURL: baseURL(),
-      accountType: userType,
+      accountType: type,
       warnings,
-      catalogueFound: !!base,
-      networkIds: { mtn: await networkId('mtn'), glo: await networkId('glo'), '9mobile': await networkId('9mobile'), airtel: await networkId('airtel') },
-      cableIds: { dstv: await cableId('dstv'), gotv: await cableId('gotv'), startimes: await cableId('startimes') },
-      discoIds: { 'ikeja-electric': await discoId('ikeja-electric'), 'eko-electric': await discoId('eko-electric'), 'abuja-electric': await discoId('abuja-electric') },
+      networkIds: ids,
+      cableIds,
+      discos: await getDiscos(),
       examPins: (base?.exam || []).map((e) => `${e.exam_name}: ${e.amount}`),
       sampleDataPlans: (await getVariations('data', 'mtn')).slice(0, 3),
       sampleCablePlans: (await getVariations('cable', 'dstv')).slice(0, 3),
-      detectedBalance: findBalance(user?.user ?? user),
+      detectedBalance: num(user?.user?.Account_Balance),
       userResponse: summarise(user),
       catalogueResponse: summarise(base)
     };
@@ -559,4 +531,4 @@ async function diagnostics() {
   }
 }
 
-module.exports = { getVariations, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK_CATALOG };
+module.exports = { getVariations, getDiscos, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK };

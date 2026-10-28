@@ -6,6 +6,7 @@ const User = require('../models/User');
 const { publicUser, createToken, hashToken } = require('../utils/helpers');
 const { requireAuth } = require('../middleware/auth');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
+const { logEvent } = require('../utils/log');
 
 const router = express.Router();
 
@@ -77,6 +78,8 @@ router.post('/register', async (req, res) => {
   });
 
   const sent = await issueVerification(user);
+  logEvent({ category: 'auth', action: 'register', message: `New account: ${user.email}`, user: { id: user.id, email: user.email }, req, meta: { emailSent: !!sent.ok } });
+  if (!sent.ok) logEvent({ category: 'system', level: 'error', action: 'email.failed', message: `Verification email could not be sent to ${user.email}`, user: { id: user.id, email: user.email } });
 
   res.status(201).json({
     message: sent.ok
@@ -113,6 +116,7 @@ router.post('/verify-email', async (req, res) => {
   user.verifyTokenHash = null;
   user.verifyTokenExpires = null;
   await user.save();
+  logEvent({ category: 'auth', action: 'email.verified', message: `Email verified: ${user.email}`, user: { id: user.id, email: user.email }, req });
 
   res.json({ message: 'Email verified. You can now log in.' });
 });
@@ -145,12 +149,19 @@ router.post('/login', async (req, res) => {
 
   const user = await User.findOne({ email: String(email).trim().toLowerCase() });
   if (!user) {
+    logEvent({ category: 'auth', level: 'warn', action: 'login.failed', message: `Failed login for unknown email ${String(email).trim().toLowerCase()}`, req });
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
 
   const match = await bcrypt.compare(password, user.password);
   if (!match) {
+    logEvent({ category: 'auth', level: 'warn', action: 'login.failed', message: `Wrong password for ${user.email}`, user: { id: user.id, email: user.email }, req });
     return res.status(401).json({ error: 'Incorrect email or password.' });
+  }
+
+  if (user.suspended) {
+    logEvent({ category: 'auth', level: 'warn', action: 'login.blocked', message: `Suspended account tried to log in: ${user.email}`, user: { id: user.id, email: user.email }, req });
+    return res.status(403).json({ error: 'This account has been suspended. Please contact support.', code: 'ACCOUNT_SUSPENDED' });
   }
 
   // Checked only after the password is correct, so this can't be used to probe emails.
@@ -161,6 +172,10 @@ router.post('/login', async (req, res) => {
       email: user.email
     });
   }
+
+  user.lastLoginAt = new Date();
+  await user.save();
+  logEvent({ category: 'auth', action: 'login', message: `Logged in: ${user.email}`, user: { id: user.id, email: user.email }, req });
 
   const token = signToken(user);
   res.json({ token, user: publicUser(user) });
@@ -183,7 +198,8 @@ router.post('/forgot-password', async (req, res) => {
     user.resetTokenExpires = new Date(Date.now() + RESET_TTL_MS);
     user.resetEmailSentAt = new Date();
     await user.save();
-    await sendPasswordResetEmail(user, raw);
+    const sent = await sendPasswordResetEmail(user, raw);
+    logEvent({ category: 'auth', level: sent.ok ? 'info' : 'error', action: 'password.reset.requested', message: `Password reset link ${sent.ok ? 'sent to' : 'could NOT be sent to'} ${user.email}`, user: { id: user.id, email: user.email }, req });
   }
 
   res.json({ message: 'If an account exists for that email, we have sent a password reset link.' });
@@ -215,6 +231,7 @@ router.post('/reset-password', async (req, res) => {
   user.verifyTokenHash = null;
   user.verifyTokenExpires = null;
   await user.save();
+  logEvent({ category: 'auth', action: 'password.reset', message: `Password changed via reset link: ${user.email}`, user: { id: user.id, email: user.email }, req });
 
   res.json({ message: 'Password updated. You can now log in with your new password.' });
 });

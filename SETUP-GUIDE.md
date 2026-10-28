@@ -49,7 +49,7 @@ Arrifqubundle's documentation doesn't mention a test mode, so assume stage 2 pur
 | `JWT_SECRET` | a long random string (run `openssl rand -hex 32`) |
 | `PROVIDER_MODE` | start with `mock` |
 | `CLIENT_ORIGIN` | `https://elmubarak.com.ng,https://www.elmubarak.com.ng` |
-| `FRONTEND_URL` | `https://elmubarak.com.ng` |
+| `FRONTEND_URL` | `https://elmubarak.com.ng` (**one** address only, never a list. A list here broke the reset-password link) |
 | `ADMIN_EMAIL` | the email you'll register as admin with |
 | `RESEND_API_KEY` | Part 4 |
 | `EMAIL_FROM` | `Elmubarak Digital Hub <no-reply@elmubarak.com.ng>` |
@@ -173,9 +173,35 @@ and a red warning below `PROVIDER_LOW_BALANCE_ALERT`). Admins also see it at the
 
 ---
 
+## Part 7b: The admin panel (what each page does)
+
+Open **Admin panel** from the sidebar (admins only).
+
+| Page | What you can do |
+|---|---|
+| **Overview** | Live provider balance (with low-balance warning), orders needing attention, sales and estimated profit (today / 7 / 30 days), 14-day chart, sales by service, customer count and total money held in wallets |
+| **Transactions** | Search by reference, customer name, email or phone. Filter by type, status and dates. Click a row for full details (provider charge, profit, token). Export to CSV. **Mark paid / Refund** for orders stuck on processing |
+| **Users** | Search customers, see their orders and spending, **adjust wallet**, **suspend / reactivate**, make or remove admins |
+| **Services & plans** | Turn off whole services (airtime, data, electricity, cable, exam PINs, funding, transfers, withdrawals, airtime-to-cash), individual networks, plan types (e.g. MTN > Gifting), single data plans, electricity companies, cable providers and packages. **Maintenance mode** and a **notice banner** for all customers. Anything switched off disappears from the customer's dashboard within a minute |
+| **Withdrawals / Airtime to cash** | Review and approve or reject requests |
+| **Pricing & markup** | Your profit margins per service |
+| **Activity log** | Every login, failed login, order, payment, admin action and provider problem, searchable, with the provider's raw reply on order entries. Exports to CSV. Kept 90 days |
+| **System check** | Shows which settings are missing (email key, Flutterwave hash, provider key, wrong FRONTEND_URL, etc.) and the exact webhook URL to paste into Flutterwave |
+
+**Exam PINs are OFF by default.** Arrifqubundle's catalogue lists WAEC/NECO, but the purchase call for PINs hasn't been confirmed. Turn them on under *Services & plans*
+only after buying one cheap PIN yourself and checking it arrives (the Activity log shows the provider's reply).
+
+**How customers pay now:** at checkout they choose **Wallet** (greyed out if the balance is too low) or **Card / bank transfer / USSD (Flutterwave)**. A Flutterwave
+payment is credited to their wallet and the order runs straight away. If the order itself fails, the money stays in their wallet.
+
+---
+
 ## Part 8: Test everything (do this before real money)
 
 **Stage A: mock (`PROVIDER_MODE=mock`):**
+- [ ] Admin -> System check: everything green (in mock mode some items are expected to show as missing).
+- [ ] Admin -> Services & plans: switch MTN data plan type off, confirm it disappears from the customer's data page, switch it back on.
+- [ ] At checkout with a small balance the Wallet option is greyed out and Flutterwave is selected.
 - [ ] Register -> "Check your email" screen -> (email link is in the Render log in mock/no-key mode) -> verify -> log in.
 - [ ] Log in before verifying -> blocked with a "Resend link" option.
 - [ ] "Forgot password?" -> reset link -> new password -> log in. Eye icons work on every password field.
