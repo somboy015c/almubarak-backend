@@ -1,3 +1,7 @@
+// Withdrawals are MANUAL. The customer asks, the money is taken from their wallet and held,
+// an admin sends the transfer by hand and then marks it paid (or rejects it, which refunds).
+// Every step emails the customer and the admins.
+
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const User = require('../models/User');
@@ -6,10 +10,25 @@ const Withdrawal = require('../models/Withdrawal');
 const { getOrCreatePricing } = require('../models/Pricing');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { generateRef, publicUser } = require('../utils/helpers');
-const flutterwave = require('../services/flutterwave');
+const { frontendUrl } = require('../utils/urls');
+const { logEvent } = require('../utils/log');
 const { notifyWithdrawal, alertAdmin, money } = require('../services/notify');
 
 const router = express.Router();
+
+// The customer's own withdrawal requests and where each one stands.
+router.get('/', requireAuth, async (req, res) => {
+  const list = await Withdrawal.find({ userId: req.user.id });
+  res.json({
+    withdrawals: list
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 30)
+      .map((w) => ({
+        id: w.id, amount: w.amount, status: w.status, bankName: w.bankName, accountNumber: w.accountNumber,
+        accountName: w.accountName, note: w.adminNote || '', createdAt: w.createdAt, updatedAt: w.updatedAt
+      }))
+  });
+});
 
 router.post('/', requireAuth, requirePin, async (req, res) => {
   const numericAmount = Number(req.body.amount);
@@ -59,57 +78,31 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
     transactionId: transaction.id
   });
 
-  const refund = async (note) => {
-    const flipped = await Withdrawal.findOneAndUpdate({ id: withdrawal.id, status: 'pending' }, { status: 'failed', adminNote: note });
-    if (flipped) {
-      await User.updateOne({ id: user.id }, { $inc: { walletBalance: numericAmount } });
-      await Transaction.updateOne({ id: transaction.id }, { status: 'failed' });
-    }
-  };
-
-  const transferResult = await flutterwave.initiateTransfer({
-    amount: numericAmount,
-    bankCode: user.bankAccount.bankCode,
-    accountNumber: user.bankAccount.accountNumber,
-    accountName: user.bankAccount.accountName,
-    reason: `Elmubarak withdrawal ${reference}`
+  logEvent({
+    category: 'payment', action: 'withdrawal.requested',
+    message: `Withdrawal of ${numericAmount} requested`, user: { id: user.id, email: user.email },
+    meta: { withdrawal: withdrawal.id, reference, bank: user.bankAccount.bankName }
   });
 
-  if (!transferResult.ok) {
-    await refund(transferResult.message || 'Payout failed');
-    const fresh = await User.findOne({ id: user.id });
-    notifyWithdrawal(fresh, { state: 'failed', amount: numericAmount, bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName, balance: fresh.walletBalance });
-    return res.status(502).json({
-      error: transferResult.message || 'Withdrawal could not be processed. You have not been charged.',
-      user: publicUser(fresh)
-    });
-  }
+  // Tell the customer, and tell the admins exactly where to send the money.
+  const bank = { bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName };
+  notifyWithdrawal(debited, { state: 'requested', amount: numericAmount, ...bank, balance: debited.walletBalance });
+  alertAdmin({
+    level: 'warning',
+    title: `Withdrawal to pay: ${money(numericAmount)}`,
+    message: `${user.fullName} asked to withdraw ${money(numericAmount)}. The money is already taken from their wallet. Send it to the account below, then mark it as paid in Admin > Withdrawals so the customer is told.`,
+    rows: [
+      ['Customer', `${user.fullName} (${user.email})`],
+      ['Amount to send', money(numericAmount)],
+      ['Bank', bank.bankName], ['Account number', bank.accountNumber], ['Account name', bank.accountName],
+      ['Reference', reference]
+    ],
+    button: { text: 'Open withdrawals', url: `${frontendUrl()}/admin.html#withdrawals` }
+  });
 
-  withdrawal.providerRef = transferResult.providerRef;
-  withdrawal.payoutRef = transferResult.reference;
-
-  if (transferResult.status === 'success') {
-    withdrawal.status = 'success';
-    withdrawal.adminNote = 'Paid automatically via Flutterwave';
-    await withdrawal.save();
-    await Transaction.updateOne({ id: transaction.id }, { status: 'success' });
-    const done = await User.findOne({ id: user.id });
-    notifyWithdrawal(done, { state: 'success', amount: numericAmount, bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName, balance: done.walletBalance });
-    return res.json({
-      message: 'Withdrawal successful. Funds are on the way to your bank account.',
-      user: publicUser(done)
-    });
-  }
-
-  // Still processing at Flutterwave: stays pending until their webhook settles it
-  // (or an admin approves/rejects it from the admin panel).
-  await withdrawal.save();
-  const waiting = await User.findOne({ id: user.id });
-  notifyWithdrawal(waiting, { state: 'pending', amount: numericAmount, bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName, balance: waiting.walletBalance });
-  alertAdmin({ key: `withdrawal:${withdrawal.id}`, level: 'info', title: `Withdrawal of ${money(numericAmount)} is waiting`, message: `${user.fullName} requested a withdrawal that is still processing at Flutterwave. If it stays pending, check it in Admin > Withdrawals.`, rows: [['Customer', `${user.fullName} (${user.email})`], ['Amount', money(numericAmount)], ['Bank', `${user.bankAccount.bankName} ${user.bankAccount.accountNumber}`]] });
-  return res.json({
-    message: 'Withdrawal submitted and is being processed. You will be notified shortly.',
-    user: publicUser(waiting)
+  res.json({
+    message: 'Withdrawal request received. We will send the money to your bank account and update the status here. You will get an email at each step.',
+    user: publicUser(debited)
   });
 });
 

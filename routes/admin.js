@@ -25,7 +25,8 @@ const NETWORKS = ['mtn', 'glo', 'airtel', '9mobile'];
 const CABLES = ['dstv', 'gotv', 'startimes'];
 const SERVICE_LABELS = {
   airtime: 'Airtime', data: 'Data', electricity: 'Electricity', cable: 'Cable TV', exam: 'Exam PINs',
-  funding: 'Wallet funding / pay with Flutterwave', transfer: 'Wallet transfers', withdrawal: 'Withdrawals', 'airtime-to-cash': 'Airtime to cash'
+  funding: 'Wallet funding / pay with Flutterwave', transfer: 'Wallet transfers', withdrawal: 'Withdrawals (paid manually)',
+  'airtime-to-cash': 'Airtime to cash (manual review)', 'airtime-to-cash-auto': 'Airtime to cash: automatic verification'
 };
 
 const actorOf = (req) => ({ id: req.user.id, email: req.user.email });
@@ -102,7 +103,7 @@ router.get('/stats', async (req, res) => {
       { $sort: { _id: 1 } }
     ]),
     Transaction.countDocuments({ status: 'pending', type: { $in: SERVICE_TYPES } }),
-    Withdrawal.countDocuments({ status: 'pending' }),
+    Withdrawal.countDocuments({ status: { $in: ['pending', 'processing'] } }),
     AirtimeToCash.countDocuments({ status: 'pending' }),
     Transaction.countDocuments({ status: 'failed', type: { $in: SERVICE_TYPES }, createdAt: { $gte: d1 } }),
     Transaction.countDocuments()
@@ -336,31 +337,56 @@ router.get('/withdrawals', async (req, res) => {
   res.json({ withdrawals: await enrich(await Withdrawal.find().sort({ createdAt: -1 }).limit(300)) });
 });
 
-router.post('/withdrawals/:id/approve', async (req, res) => {
-  const withdrawal = await Withdrawal.findOneAndUpdate(
+const OPEN = { $in: ['pending', 'processing'] };
+const bankOf = (w) => ({ bankName: w.bankName, accountNumber: w.accountNumber, accountName: w.accountName });
+
+// Step 2 (optional): "I am sending it now". The customer is told it is on its way.
+router.post('/withdrawals/:id/processing', async (req, res) => {
+  const w = await Withdrawal.findOneAndUpdate(
     { id: req.params.id, status: 'pending' },
-    { status: 'success', adminNote: req.body.note || 'Paid out' },
+    { status: 'processing', updatedAt: new Date(), processedBy: actorOf(req) },
     { new: true }
   );
-  if (!withdrawal) return res.status(400).json({ error: 'Request not found or already processed.' });
-  if (withdrawal.transactionId) await Transaction.findOneAndUpdate({ id: withdrawal.transactionId }, { status: 'success' });
-  logEvent({ category: 'admin', action: 'withdrawal.approve', message: `Withdrawal of ${withdrawal.amount} marked paid`, actor: actorOf(req), user: { id: withdrawal.userId }, meta: { withdrawal: withdrawal.id } });
-  User.findOne({ id: withdrawal.userId }).then((u) => u && notifyWithdrawal(u, { state: 'success', amount: withdrawal.amount, bankName: withdrawal.bankName, accountNumber: withdrawal.accountNumber, accountName: withdrawal.accountName, balance: u.walletBalance }));
-  res.json({ message: 'Withdrawal marked as paid.', withdrawal });
+  if (!w) return res.status(400).json({ error: 'Request not found, or it is no longer waiting.' });
+  const owner = await User.findOne({ id: w.userId });
+  if (owner) notifyWithdrawal(owner, { state: 'processing', amount: w.amount, ...bankOf(w), balance: owner.walletBalance });
+  logEvent({ category: 'admin', action: 'withdrawal.processing', message: `Withdrawal of ${w.amount} marked as processing`, actor: actorOf(req), user: { id: w.userId, email: owner?.email }, meta: { withdrawal: w.id } });
+  alertAdmin({ level: 'info', title: `Withdrawal being processed: ${money(w.amount)}`, message: `${req.user.fullName} started paying a withdrawal. The customer has been told it is on its way.`, rows: [['Customer', owner ? owner.email : ''], ['Amount', money(w.amount)], ['By', req.user.email]], button: { text: 'Open withdrawals', url: `${frontendUrl()}/admin.html#withdrawals` } });
+  res.json({ message: 'Marked as processing. The customer has been emailed.', withdrawal: w });
 });
 
-router.post('/withdrawals/:id/reject', async (req, res) => {
-  const withdrawal = await Withdrawal.findOneAndUpdate(
-    { id: req.params.id, status: 'pending' },
-    { status: 'failed', adminNote: req.body.note || 'Rejected' },
+// Final step: the money has been sent. note = payment reference (shown to the customer).
+router.post('/withdrawals/:id/approve', async (req, res) => {
+  const note = String(req.body.note || '').slice(0, 200);
+  const w = await Withdrawal.findOneAndUpdate(
+    { id: req.params.id, status: OPEN },
+    { status: 'success', adminNote: note, updatedAt: new Date(), processedBy: actorOf(req) },
     { new: true }
   );
-  if (!withdrawal) return res.status(400).json({ error: 'Request not found or already processed.' });
-  const refunded = await User.findOneAndUpdate({ id: withdrawal.userId }, { $inc: { walletBalance: Number(withdrawal.amount) } }, { new: true }); // refund
-  if (withdrawal.transactionId) await Transaction.findOneAndUpdate({ id: withdrawal.transactionId }, { status: 'failed' });
-  if (refunded) notifyWithdrawal(refunded, { state: 'failed', amount: withdrawal.amount, bankName: withdrawal.bankName, accountNumber: withdrawal.accountNumber, accountName: withdrawal.accountName, balance: refunded.walletBalance });
-  logEvent({ category: 'admin', level: 'warn', action: 'withdrawal.reject', message: `Withdrawal of ${withdrawal.amount} rejected and refunded`, actor: actorOf(req), user: { id: withdrawal.userId }, meta: { withdrawal: withdrawal.id, note: req.body.note || null } });
-  res.json({ message: 'Withdrawal rejected and wallet refunded.', withdrawal });
+  if (!w) return res.status(400).json({ error: 'Request not found or already settled.' });
+  if (w.transactionId) await Transaction.findOneAndUpdate({ id: w.transactionId }, { status: 'success' });
+  const owner = await User.findOne({ id: w.userId });
+  if (owner) notifyWithdrawal(owner, { state: 'success', amount: w.amount, ...bankOf(w), balance: owner.walletBalance, note });
+  logEvent({ category: 'admin', action: 'withdrawal.approve', message: `Withdrawal of ${w.amount} marked paid`, actor: actorOf(req), user: { id: w.userId, email: owner?.email }, meta: { withdrawal: w.id, note } });
+  alertAdmin({ level: 'info', title: `Withdrawal paid: ${money(w.amount)}`, message: `${req.user.fullName} marked this withdrawal as paid. The customer has been emailed.`, rows: [['Customer', owner ? owner.email : ''], ['Amount', money(w.amount)], ['Bank', `${w.bankName} ${w.accountNumber}`], ['Reference / note', note], ['Paid by', req.user.email]], button: { text: 'Open withdrawals', url: `${frontendUrl()}/admin.html#withdrawals` } });
+  res.json({ message: 'Marked as paid. The customer has been emailed.', withdrawal: w });
+});
+
+// Refuse it: the full amount goes back to the customer's wallet. note = the reason (shown to the customer).
+router.post('/withdrawals/:id/reject', async (req, res) => {
+  const note = String(req.body.note || '').slice(0, 200);
+  const w = await Withdrawal.findOneAndUpdate(
+    { id: req.params.id, status: OPEN },
+    { status: 'failed', adminNote: note || 'Rejected', updatedAt: new Date(), processedBy: actorOf(req) },
+    { new: true }
+  );
+  if (!w) return res.status(400).json({ error: 'Request not found or already settled.' });
+  const owner = await User.findOneAndUpdate({ id: w.userId }, { $inc: { walletBalance: Number(w.amount) } }, { new: true }); // refund
+  if (w.transactionId) await Transaction.findOneAndUpdate({ id: w.transactionId }, { status: 'failed' });
+  if (owner) notifyWithdrawal(owner, { state: 'failed', amount: w.amount, ...bankOf(w), balance: owner.walletBalance, note });
+  logEvent({ category: 'admin', level: 'warn', action: 'withdrawal.reject', message: `Withdrawal of ${w.amount} rejected and refunded`, actor: actorOf(req), user: { id: w.userId, email: owner?.email }, meta: { withdrawal: w.id, note } });
+  alertAdmin({ level: 'info', title: `Withdrawal rejected: ${money(w.amount)}`, message: `${req.user.fullName} rejected this withdrawal. The money was returned to the customer's wallet and they have been emailed.`, rows: [['Customer', owner ? owner.email : ''], ['Amount', money(w.amount)], ['Reason', note], ['By', req.user.email]], button: { text: 'Open withdrawals', url: `${frontendUrl()}/admin.html#withdrawals` } });
+  res.json({ message: 'Rejected and the wallet was refunded. The customer has been emailed.', withdrawal: w });
 });
 
 // ============================================================ Airtime to cash =====

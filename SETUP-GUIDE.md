@@ -12,7 +12,7 @@ Do the parts **in order**. Each part says what you'll have at the end.
 | Database | MongoDB Atlas | Users, wallets, transactions |
 | Emails | Resend | Verification + password-reset emails |
 | Airtime / data / electricity / cable TV | Arrifqubundle | Delivers what customers buy |
-| Wallet funding + withdrawals | Flutterwave | Takes customer payments, pays out to banks |
+| Wallet funding and card payments | Flutterwave | Takes customer payments. (Withdrawals are paid by you by hand.) |
 
 **Three stages, one switch.** `PROVIDER_MODE` in the backend settings controls everything:
 
@@ -145,7 +145,7 @@ and a red warning below `PROVIDER_LOW_BALANCE_ALERT`). Admins also see it at the
 
 ---
 
-## Part 6: Flutterwave (wallet funding + withdrawals)
+## Part 6: Flutterwave (customer payments)
 
 ### 6a. Test mode first
 1. Sign up at https://flutterwave.com and open the dashboard. Switch to **Test mode**.
@@ -158,9 +158,8 @@ and a red warning below `PROVIDER_LOW_BALANCE_ALERT`). Admins also see it at the
 ### 6b. Go live
 1. Complete Flutterwave's business verification (KYC) so you can switch off test mode.
 2. Copy the **live** keys into Render. Re-save the webhook URL + secret hash in **live** mode (test and live have separate settings).
-3. **Withdrawals (payouts)** need extra setup on Flutterwave: Transfers/payouts enabled for your account, your Render **outbound IPs
-   whitelisted** in API settings, and enough balance in your Flutterwave account to cover payouts. If a withdrawal fails, the customer is
-   refunded automatically and the real reason is in your Render logs. Ask Flutterwave support if payouts are not enabled yet.
+3. **Withdrawals need no Flutterwave setup.** Customers request them and you pay them by hand (from your bank app or the Flutterwave dashboard), then mark
+   them paid in Admin > Withdrawals. Each step emails the customer and the admins. You do not need payout/transfer access or IP whitelisting for this.
 4. Check who pays the processing fee (Flutterwave's fee settings). Funding credits customers the exact amount they entered.
 
 ---
@@ -205,11 +204,14 @@ Open **Admin panel** from the sidebar (admins only).
 | **Transactions** | Search by reference, customer name, email or phone. Filter by type, status and dates. Click a row for full details (provider charge, profit, token). Export to CSV. **Mark paid / Refund** for orders stuck on processing |
 | **Users** | Search customers, see their orders and spending, **adjust wallet**, **suspend / reactivate**, make or remove admins |
 | **Services & plans** | Turn off whole services (airtime, data, electricity, cable, exam PINs, funding, transfers, withdrawals, airtime-to-cash), individual networks, plan types (e.g. MTN > Gifting), single data plans, electricity companies, cable providers and packages. **Maintenance mode** and a **notice banner** for all customers. Anything switched off disappears from the customer's dashboard within a minute |
-| **Withdrawals / Airtime to cash** | Review and approve or reject requests |
+| **Withdrawals** | Customers request a withdrawal and the money is held from their wallet. You see the bank details (with a Copy button), send the money yourself, then click **Mark paid** (add your payment reference) or **Reject** (refunds the wallet). **Start processing** is optional and tells the customer it is on its way. Customer and admins are emailed at every step, and the customer sees the status under Withdraw |
+| **Airtime to cash** | Review each request, confirm the airtime arrived, then **Approve** or **Reject**. The automatic option is OFF (it is not connected to any provider) |
 | **Pricing & markup** | Your profit margins per service |
 | **Send a notice** | Type a title and message (optional button), choose all customers or one customer, and pick email, popup or both. Customers get the email (with your branding) and a popup the next time they open their dashboard. Past notices stay under "Notices" in their menu. **Send a test to me first.** Shows how many were emailed and popped up |
 | **Activity log** | Every login, failed login, order, payment, admin action and provider problem, searchable, with the provider's raw reply on order entries. Exports to CSV. Kept 90 days |
 | **System check** | Shows which settings are missing (email key, Flutterwave hash, provider key, wrong FRONTEND_URL, etc.) and the exact webhook URL to paste into Flutterwave |
+
+**Exam PINs and automatic airtime-to-cash are OFF by default.** Automatic airtime-to-cash is not connected to any verification provider, so it stays off (customers only see the manual review option).
 
 **Exam PINs are OFF by default.** Arrifqubundle's catalogue lists WAEC/NECO, but the purchase call for PINs hasn't been confirmed. Turn them on under *Services & plans*
 only after buying one cheap PIN yourself and checking it arrives (the Activity log shows the provider's reply).
@@ -238,7 +240,7 @@ payment is credited to their wallet and the order runs straight away. If the ord
 - [ ] Buy ₦100 airtime and a small data plan; meter/smartcard verification returns the customer name.
 - [ ] Admin Overview shows your Arrifqubundle balance.
 
-**Stage C: production:** switch to Flutterwave live keys (Part 6b), then do one small real funding and one small real withdrawal before announcing.
+**Stage C: production:** switch to Flutterwave live keys (Part 6b), then do one small real funding, and request one small withdrawal yourself and pay it by hand, before announcing.
 
 ---
 
@@ -254,7 +256,8 @@ payment is credited to their wallet and the order runs straight away. If the ord
 | Balance card says it could not find the balance | Run **Provider check** and send me the output so I can map the field |
 | Customer gets "service temporarily unavailable" for one network/disco | That ID is missing/wrong: run **Provider check**, fix with the ARRIFQU_*_IDS overrides |
 | Paid on Flutterwave but wallet not credited | Webhook URL/secret hash mismatch; wait a minute and refresh (the app also re-verifies); check logs |
-| Withdrawal fails | Payouts not enabled / IPs not whitelisted / low Flutterwave balance. See Render logs |
+| Customers cannot see Withdraw or the bank-account settings | The Withdrawals checkbox is switched off in Admin > Services & plans |
+| A withdrawal request is waiting | Admin > Withdrawals: send the money, then Mark paid (or Reject to refund) |
 | Orders stuck on "processing" | Normal for a few minutes; they settle automatically. Still stuck after ~30 min: check Arrifqubundle's transaction history, then use **Mark paid** / **Refund** in Admin -> Transactions |
 | Customers see "service temporarily unavailable" everywhere | Your Arrifqubundle wallet is empty. Top it up |
 

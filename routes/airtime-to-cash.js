@@ -8,13 +8,18 @@ const { requireAuth, requirePin } = require('../middleware/auth');
 const { generateRef } = require('../utils/helpers');
 const airtimeToCashProvider = require('../services/airtimeToCashProvider');
 const { notifyA2C, alertAdmin, money } = require('../services/notify');
+const { getSettings, isServiceOn } = require('../models/Settings');
 
 const router = express.Router();
 
 router.post('/', requireAuth, requirePin, async (req, res) => {
   const { network, amountSent, phoneUsed, method } = req.body;
   const numericAmount = Number(amountSent);
-  const chosenMethod = method === 'automatic' ? 'automatic' : 'manual';
+  // Automatic verification only runs while the admin has switched it on (it starts OFF).
+  const settings = await getSettings();
+  const autoOn = isServiceOn(settings, 'airtime-to-cash-auto');
+  const chosenMethod = method === 'automatic' && autoOn ? 'automatic' : 'manual';
+  const downgraded = method === 'automatic' && !autoOn;
 
   if (!network || !phoneUsed) {
     return res.status(400).json({ error: 'Network and the phone number used are required.' });
@@ -60,7 +65,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   if (chosenMethod === 'manual') {
     queued();
     return res.json({
-      message: `Request submitted for manual review. You'll receive ₦${cashValue.toLocaleString()} (${rate}% of face value) once an admin verifies it.`
+      message: `${downgraded ? 'Automatic verification is not available right now, so your request was sent for manual review. ' : ''}Request submitted for manual review. You'll receive ₦${cashValue.toLocaleString()} (${rate}% of face value) once an admin verifies it.`
     });
   }
 

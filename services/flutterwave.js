@@ -132,7 +132,9 @@ async function resolveAccount({ accountNumber, bankCode }) {
   }
 }
 
-// ---- Payouts (withdrawals) ----
+// ---- Payouts ----
+// NOT USED: withdrawals are paid manually by an admin (see routes/withdrawal.js).
+// Kept only in case automatic payouts are wanted again later.
 // Returns { ok, status: 'success' | 'pending' | 'failed', reference, providerRef }.
 
 async function initiateTransfer({ amount, bankCode, accountNumber, accountName, reason }) {

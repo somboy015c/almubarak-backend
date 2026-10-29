@@ -106,16 +106,19 @@ const notifyPayment = safe(async (user, p) => {
   }
 });
 
-// ---------------------------------------------------------------- withdrawals
+// ---------------------------------------------------------------- withdrawals (paid by hand by an admin)
+// w.state: requested | processing | success | failed
 const notifyWithdrawal = safe(async (user, w) => {
-  const rows = [['Amount', money(w.amount)], ['To', [w.bankName, w.accountNumber].filter(Boolean).join(' · ')], ['Account name', w.accountName], ['Date', when()], ['Wallet balance', w.balance !== undefined ? money(w.balance) : '']];
+  const bank = [w.bankName, w.accountNumber].filter(Boolean).join(' · ');
+  const rows = [['Amount', money(w.amount)], ['To', bank], ['Account name', w.accountName], ['Date', when()], ['Wallet balance', w.balance !== undefined ? money(w.balance) : ''], [w.state === 'failed' ? 'Reason' : 'Note from us', w.note]];
   const map = {
-    success: { tone: 'success', title: 'Withdrawal successful', intro: `Hi ${firstName(user)}, your withdrawal of ${money(w.amount)} has been sent to your bank account.` },
-    pending: { tone: 'pending', title: 'Withdrawal received', intro: `Hi ${firstName(user)}, your withdrawal of ${money(w.amount)} is being processed. We will email you when it is complete.` },
-    failed: { tone: 'failed', title: 'Withdrawal failed', intro: `Hi ${firstName(user)}, your withdrawal of ${money(w.amount)} could not be completed. The money has been returned to your wallet.` }
+    requested: { tone: 'pending', title: 'Withdrawal request received', intro: `Hi ${firstName(user)}, we received your request to withdraw ${money(w.amount)} to your bank account. The amount has been taken from your wallet and our team will send it to you. We will email you at every step, and you can always see the status under Withdraw in your dashboard.` },
+    processing: { tone: 'pending', title: 'We are sending your money', intro: `Hi ${firstName(user)}, your withdrawal of ${money(w.amount)} is now being processed and the transfer is on its way. We will email you again as soon as it is complete.` },
+    success: { tone: 'success', title: 'Withdrawal paid', intro: `Hi ${firstName(user)}, we have sent ${money(w.amount)} to your bank account. It should reach you shortly, depending on your bank.` },
+    failed: { tone: 'failed', title: 'Withdrawal not completed', intro: `Hi ${firstName(user)}, we could not complete your withdrawal of ${money(w.amount)}. The full amount has been returned to your wallet.` }
   };
-  const m = map[w.state] || map.pending;
-  await send(user, 'emailOrders', { subject: `${m.title}: ${money(w.amount)}`, tone: m.tone, title: m.title, intro: m.intro, rows, button: dashboard() });
+  const m = map[w.state] || map.requested;
+  await send(user, 'emailOrders', { subject: `${m.title}: ${money(w.amount)}`, tone: m.tone, title: m.title, intro: m.intro, rows, button: { text: 'View my withdrawals', url: `${frontendUrl()}/dashboard.html` } });
 });
 
 // ---------------------------------------------------------------- transfers

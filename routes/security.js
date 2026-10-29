@@ -4,6 +4,7 @@ const User = require('../models/User');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { publicUser } = require('../utils/helpers');
 const flutterwave = require('../services/flutterwave');
+const { requireService } = require('../middleware/services');
 
 const router = express.Router();
 
@@ -14,12 +15,12 @@ router.get('/status', requireAuth, (req, res) => {
   });
 });
 
-router.get('/banks', requireAuth, async (req, res) => {
+router.get('/banks', requireAuth, requireService('withdrawal'), async (req, res) => {
   const banks = await flutterwave.listBanks();
   res.json({ banks });
 });
 
-router.post('/resolve-account', requireAuth, async (req, res) => {
+router.post('/resolve-account', requireAuth, requireService('withdrawal'), async (req, res) => {
   const { accountNumber, bankCode } = req.body;
   if (!accountNumber || !bankCode) {
     return res.status(400).json({ error: 'Account number and bank are required.' });
@@ -69,7 +70,7 @@ router.post('/pin', requireAuth, async (req, res) => {
 // Save or update the bank account withdrawals get paid into.
 // Requires the transaction PIN so a hijacked session can't quietly
 // redirect future payouts.
-router.put('/bank-account', requireAuth, requirePin, async (req, res) => {
+router.put('/bank-account', requireAuth, requireService('withdrawal'), requirePin, async (req, res) => {
   const { bankName, bankCode, accountNumber, accountName } = req.body;
   if (!bankName || !bankCode || !accountNumber || !accountName) {
     return res.status(400).json({ error: 'Bank, account number and account name are all required.' });
