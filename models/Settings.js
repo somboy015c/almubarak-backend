@@ -15,7 +15,16 @@ const settingsSchema = new mongoose.Schema({
 
   maintenance: { type: Boolean, default: false }, // blocks all purchases/payments
   maintenanceMessage: { type: String, default: 'We are doing some maintenance. Please check back shortly.' },
-  notice: { type: String, default: '' } // banner shown to every customer
+  notice: { type: String, default: '' }, // banner shown to every customer
+
+  // "Get the app" badge on the public homepage
+  appDownloadEnabled: { type: Boolean, default: true },
+  appDownloadUrl: { type: String, default: '' }, // empty = use the link in the website's config.js
+
+  // Emails
+  emailOrders: { type: Boolean, default: true }, // order / payment / withdrawal emails to customers
+  emailLogins: { type: Boolean, default: true }, // "new login" security email to customers
+  emailAdminAlerts: { type: Boolean, default: true } // security + operations emails to admins
 });
 
 const Settings = mongoose.model('Settings', settingsSchema);

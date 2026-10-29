@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { generateRef, publicUser } = require('../utils/helpers');
+const { notifyTransfer } = require('../services/notify');
 
 const router = express.Router();
 
@@ -32,20 +33,24 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   }
 
   const sender = await User.findOne({ id: req.user.id });
-  if (Number(sender.walletBalance) < numericAmount) {
-    return res.status(402).json({ error: 'Insufficient wallet balance.' });
-  }
-
   const reference = generateRef('TRF');
 
+  // Both wallet changes happen together or not at all. The debit only succeeds if the
+  // balance still covers it, so two simultaneous transfers can never overspend.
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      sender.walletBalance = Number(sender.walletBalance) - numericAmount;
-      await sender.save({ session });
-
-      recipientUser.walletBalance = Number(recipientUser.walletBalance) + numericAmount;
-      await recipientUser.save({ session });
+      const debited = await User.findOneAndUpdate(
+        { id: sender.id, walletBalance: { $gte: numericAmount } },
+        { $inc: { walletBalance: -numericAmount } },
+        { session, new: true }
+      );
+      if (!debited) {
+        const e = new Error('INSUFFICIENT');
+        e.code = 'INSUFFICIENT';
+        throw e;
+      }
+      await User.updateOne({ id: recipientUser.id }, { $inc: { walletBalance: numericAmount } }, { session });
 
       await Transaction.create(
         [
@@ -74,13 +79,18 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
       );
     });
   } catch (err) {
+    if (err.code === 'INSUFFICIENT') return res.status(402).json({ error: 'Insufficient wallet balance.' });
     console.error('Transfer failed:', err);
     return res.status(500).json({ error: 'The transfer could not be completed. Please try again.' });
   } finally {
     session.endSession();
   }
 
-  res.json({ message: `₦${numericAmount.toLocaleString()} sent to ${recipientUser.fullName}.`, user: publicUser(sender) });
+  const [senderNow, recipientNow] = await Promise.all([User.findOne({ id: sender.id }), User.findOne({ id: recipientUser.id })]);
+  notifyTransfer(senderNow, { direction: 'out', amount: numericAmount, counterparty: recipientUser.fullName, reference, balance: senderNow.walletBalance });
+  notifyTransfer(recipientNow, { direction: 'in', amount: numericAmount, counterparty: sender.fullName, reference, balance: recipientNow.walletBalance });
+
+  res.json({ message: `₦${numericAmount.toLocaleString()} sent to ${recipientUser.fullName}.`, user: publicUser(senderNow) });
 });
 
 module.exports = router;

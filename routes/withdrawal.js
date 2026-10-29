@@ -7,6 +7,7 @@ const { getOrCreatePricing } = require('../models/Pricing');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { generateRef, publicUser } = require('../utils/helpers');
 const flutterwave = require('../services/flutterwave');
+const { notifyWithdrawal, alertAdmin, money } = require('../services/notify');
 
 const router = express.Router();
 
@@ -77,6 +78,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   if (!transferResult.ok) {
     await refund(transferResult.message || 'Payout failed');
     const fresh = await User.findOne({ id: user.id });
+    notifyWithdrawal(fresh, { state: 'failed', amount: numericAmount, bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName, balance: fresh.walletBalance });
     return res.status(502).json({
       error: transferResult.message || 'Withdrawal could not be processed. You have not been charged.',
       user: publicUser(fresh)
@@ -91,18 +93,23 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
     withdrawal.adminNote = 'Paid automatically via Flutterwave';
     await withdrawal.save();
     await Transaction.updateOne({ id: transaction.id }, { status: 'success' });
+    const done = await User.findOne({ id: user.id });
+    notifyWithdrawal(done, { state: 'success', amount: numericAmount, bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName, balance: done.walletBalance });
     return res.json({
       message: 'Withdrawal successful. Funds are on the way to your bank account.',
-      user: publicUser(await User.findOne({ id: user.id }))
+      user: publicUser(done)
     });
   }
 
   // Still processing at Flutterwave: stays pending until their webhook settles it
   // (or an admin approves/rejects it from the admin panel).
   await withdrawal.save();
+  const waiting = await User.findOne({ id: user.id });
+  notifyWithdrawal(waiting, { state: 'pending', amount: numericAmount, bankName: user.bankAccount.bankName, accountNumber: user.bankAccount.accountNumber, accountName: user.bankAccount.accountName, balance: waiting.walletBalance });
+  alertAdmin({ key: `withdrawal:${withdrawal.id}`, level: 'info', title: `Withdrawal of ${money(numericAmount)} is waiting`, message: `${user.fullName} requested a withdrawal that is still processing at Flutterwave. If it stays pending, check it in Admin > Withdrawals.`, rows: [['Customer', `${user.fullName} (${user.email})`], ['Amount', money(numericAmount)], ['Bank', `${user.bankAccount.bankName} ${user.bankAccount.accountNumber}`]] });
   return res.json({
     message: 'Withdrawal submitted and is being processed. You will be notified shortly.',
-    user: publicUser(await User.findOne({ id: user.id }))
+    user: publicUser(waiting)
   });
 });
 

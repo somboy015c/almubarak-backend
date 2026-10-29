@@ -7,6 +7,30 @@ const { publicUser, createToken, hashToken } = require('../utils/helpers');
 const { requireAuth } = require('../middleware/auth');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 const { logEvent } = require('../utils/log');
+const { notifyLogin, notifyFailedLogins, notifyPasswordChanged, notifyWelcome, alertAdmin } = require('../services/notify');
+
+// Counts wrong passwords per account so we can warn the owner and the admins
+// when someone is guessing. Kept in memory: it resets when the server restarts.
+const failures = new Map();
+function recordFailure(user, req) {
+  const key = user.id;
+  const now = Date.now();
+  const f = failures.get(key);
+  if (!f || now - f.first > 15 * 60 * 1000) {
+    failures.set(key, { first: now, count: 1, alerted: false });
+    return;
+  }
+  f.count += 1;
+  if (f.count >= 5 && !f.alerted) {
+    f.alerted = true;
+    notifyFailedLogins(user, f.count, req);
+    alertAdmin({
+      key: `bruteforce:${user.id}`, level: 'warning', title: `Repeated failed logins for ${user.email}`,
+      message: `${f.count} wrong passwords were entered for this account within 15 minutes. The customer has been emailed. If it continues, consider suspending the account.`,
+      rows: [['Account', user.email], ['IP address', String(req.ip || '')]], throttleMs: 60 * 60 * 1000
+    });
+  }
+}
 
 const router = express.Router();
 
@@ -117,6 +141,7 @@ router.post('/verify-email', async (req, res) => {
   user.verifyTokenExpires = null;
   await user.save();
   logEvent({ category: 'auth', action: 'email.verified', message: `Email verified: ${user.email}`, user: { id: user.id, email: user.email }, req });
+  notifyWelcome(user);
 
   res.json({ message: 'Email verified. You can now log in.' });
 });
@@ -156,6 +181,7 @@ router.post('/login', async (req, res) => {
   const match = await bcrypt.compare(password, user.password);
   if (!match) {
     logEvent({ category: 'auth', level: 'warn', action: 'login.failed', message: `Wrong password for ${user.email}`, user: { id: user.id, email: user.email }, req });
+    recordFailure(user, req);
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
 
@@ -175,6 +201,8 @@ router.post('/login', async (req, res) => {
 
   user.lastLoginAt = new Date();
   await user.save();
+  failures.delete(user.id);
+  notifyLogin(user, req);
   logEvent({ category: 'auth', action: 'login', message: `Logged in: ${user.email}`, user: { id: user.id, email: user.email }, req });
 
   const token = signToken(user);
@@ -232,6 +260,7 @@ router.post('/reset-password', async (req, res) => {
   user.verifyTokenExpires = null;
   await user.save();
   logEvent({ category: 'auth', action: 'password.reset', message: `Password changed via reset link: ${user.email}`, user: { id: user.id, email: user.email }, req });
+  notifyPasswordChanged(user, req);
 
   res.json({ message: 'Password updated. You can now log in with your new password.' });
 });

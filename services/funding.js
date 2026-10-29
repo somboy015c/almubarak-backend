@@ -13,6 +13,7 @@ const Transaction = require('../models/Transaction');
 const flutterwave = require('./flutterwave');
 const { executePurchase } = require('./orders');
 const { logEvent } = require('../utils/log');
+const { notifyPayment } = require('./notify');
 
 // Runs the order attached to a payment, once. Returns a small result object or null.
 async function fulfilOrder(funding) {
@@ -66,7 +67,11 @@ async function settleFunding(reference) {
   const result = await flutterwave.verifyFunding(reference, funding.amount);
 
   if (result.state === 'failed') {
-    await Funding.updateOne({ reference, status: { $ne: 'success' } }, { status: 'failed' });
+    const flipped = await Funding.findOneAndUpdate({ reference, status: { $nin: ['success', 'failed'] } }, { status: 'failed' });
+    if (flipped) {
+      const owner = await User.findOne({ id: funding.userId });
+      if (owner) notifyPayment(owner, { state: 'failed', amount: funding.amount, reference });
+    }
     logEvent({ category: 'payment', level: 'warn', action: 'payment.failed', message: `Payment ${reference} failed or amount did not match`, user: { id: funding.userId }, meta: { reference, amount: funding.amount, flutterwave: result.raw } });
     return { state: 'failed', funding };
   }
@@ -91,6 +96,9 @@ async function settleFunding(reference) {
     reference: claimed.reference
   });
   logEvent({ category: 'payment', action: 'payment.success', message: `Payment of ${claimed.amount} confirmed (${reference})`, user: { id: claimed.userId, email: credited?.email }, meta: { reference, amount: claimed.amount, forOrder: !!claimed.order } });
+
+  // A plain top-up gets a "wallet funded" email. A payment for an order gets that order's own email instead.
+  if (!claimed.order && credited) notifyPayment(credited, { state: 'success', amount: claimed.amount, reference, balance: credited.walletBalance });
 
   const order = claimed.order ? await fulfilOrder(claimed) : null;
   return { state: 'success', funding: claimed, order };

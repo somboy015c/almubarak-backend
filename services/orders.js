@@ -11,6 +11,45 @@ const provider = require('./arrifqubundle');
 const flutterwave = require('./flutterwave');
 const { publicUser, round2 } = require('../utils/helpers');
 const { logEvent } = require('../utils/log');
+const { notifyOrder, alertAdmin } = require('./notify');
+
+const PROVIDER_ALERTS = {
+  FORBIDDEN: ['critical', 'The provider refused this server', 'Arrifqubundle replied "Forbidden". Your account probably has an allowed-IP rule that does not include this server. Add the server\'s outbound IPs in your Arrifqubundle account (or remove the IP lock). Customers cannot buy anything until this is fixed.'],
+  AUTH: ['critical', 'The provider rejected the API key', 'Arrifqubundle refused the API key (ARRIFQU_API_KEY). It may have been regenerated or mistyped. Customers cannot buy anything until this is fixed.'],
+  LOW_FUNDS: ['critical', 'Your provider wallet may be out of money', 'Arrifqubundle declined an order because of the balance. Top up your Arrifqubundle wallet now, or customer orders will keep failing.'],
+  CONFIG: ['critical', 'A service cannot run: setup problem', 'An order could not be built (missing API key or an ID the provider did not list). Check Admin panel > Overview > Provider check.'],
+  RATE_LIMIT: ['warning', 'The provider is limiting your orders', 'Arrifqubundle is rejecting orders as "too many requests". Ask them to set your account type to API.'],
+  UNREACHABLE: ['warning', 'The provider is not answering', 'Orders are timing out or getting server errors from Arrifqubundle. Affected orders are held as "processing" and will be settled automatically.']
+};
+
+function providerAlert(result) {
+  const a = result.alertCode && PROVIDER_ALERTS[result.alertCode];
+  if (!a) return;
+  alertAdmin({
+    key: `provider:${result.alertCode}`, level: a[0], title: a[1], message: a[2],
+    rows: result.logMessage ? [['Provider said', String(result.logMessage).slice(0, 200)]] : [],
+    throttleMs: 30 * 60 * 1000
+  });
+}
+
+// Five or more failed orders in ten minutes usually means something is broken.
+async function failureSpike() {
+  try {
+    const n = await Transaction.countDocuments({
+      type: { $in: ['airtime', 'data', 'electricity', 'cable', 'exam'] },
+      status: 'failed',
+      createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) }
+    });
+    if (n >= 5) {
+      alertAdmin({
+        key: 'failure-spike', level: 'critical', title: `${n} orders failed in the last 10 minutes`,
+        message: "Several customer orders are failing. Check the Activity log for the provider's replies, and check your provider balance.",
+        rows: [['Failed orders', String(n)]], throttleMs: 60 * 60 * 1000
+      });
+    }
+  } catch (e) { /* alerts must never break an order */ }
+}
+
 
 async function executePurchase({ userId, kind, price, description, payload, via = 'wallet' }) {
   price = round2(price);
@@ -60,6 +99,9 @@ async function executePurchase({ userId, kind, price, description, payload, via 
     await record('failed');
     logEvent({ ...logBase, level: 'warn', action: 'order.failed', message: `${kind} order failed: ${description}` });
     const fresh = await User.findOne({ id: userId });
+    notifyOrder(fresh, { state: 'failed', kind, description, amount: price, reference: result.request_id, via, balance: fresh.walletBalance });
+    providerAlert(result);
+    failureSpike();
     return {
       status: 422,
       state: 'failed',
@@ -72,6 +114,8 @@ async function executePurchase({ userId, kind, price, description, payload, via 
     await record('pending');
     logEvent({ ...logBase, level: 'warn', action: 'order.pending', message: `${kind} order is processing: ${description}` });
     const fresh = await User.findOne({ id: userId });
+    notifyOrder(fresh, { state: 'pending', kind, description, amount: price, reference: result.request_id, via, balance: fresh.walletBalance });
+    providerAlert(result);
     return {
       status: 202,
       state: 'pending',
@@ -87,6 +131,7 @@ async function executePurchase({ userId, kind, price, description, payload, via 
   await record('success', { token: result.token || null, cards: result.cards || null });
   logEvent({ ...logBase, level: 'info', action: 'order.success', message: `${kind} order successful: ${description}` });
   const fresh = await User.findOne({ id: userId });
+  notifyOrder(fresh, { state: 'success', kind, description, amount: price, reference: result.request_id, token: result.token, via, balance: fresh.walletBalance });
   return {
     status: 200,
     state: 'success',

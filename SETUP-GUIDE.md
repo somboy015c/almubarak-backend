@@ -173,6 +173,28 @@ and a red warning below `PROVIDER_LOW_BALANCE_ALERT`). Admins also see it at the
 
 ---
 
+## Part 7a: Emails customers and admins receive
+
+Every email uses the same Elmubarak branding (logo, green and gold, clear details table) and is sent through Resend from `no-reply@elmubarak.com.ng`.
+
+**Customers get an email when:** an order succeeds, fails or is still processing (airtime, data, electricity with the token, cable, exam PIN), a payment or wallet top-up
+is received or fails, a withdrawal is requested/paid/fails, money is sent or received, an airtime-to-cash request is received/approved/rejected, an admin changes their wallet or
+suspends/reactivates their account, they verify their email (welcome), **every time they log in** (time, device, IP and a "this wasn't me" button), their password changes,
+or there are repeated failed login attempts on their account.
+
+**Admins get an email when:** the provider refuses the server (IP lock) or the API key, the provider wallet is low (checked every 20 minutes), 5+ orders fail within 10 minutes,
+orders are stuck for 30+ minutes, someone repeatedly guesses a customer's password, a payment webhook is rejected, a withdrawal or airtime-to-cash request needs review, or an admin
+adjusts a wallet, grants/removes admin access, suspends an account, changes pricing or turns maintenance mode on/off. The same problem is never emailed more than once every 30 minutes to a few hours.
+
+Alerts go to every admin account, or only to `ADMIN_ALERT_EMAIL` if you set it (comma separated).
+In **Admin panel > Services & plans > Site** you can switch customer order emails, login emails and admin alerts on or off separately.
+
+Emails only leave the server when `RESEND_API_KEY` is set and `elmubarak.com.ng` is verified in Resend (Part 4). Until then they are only printed in the server log.
+
+**The app download badge** on the homepage can be switched on/off (and its link changed) in the same Site box. When it is off, the badge and the "Take Elmubarak with you" section disappear for everyone.
+
+---
+
 ## Part 7b: The admin panel (what each page does)
 
 Open **Admin panel** from the sidebar (admins only).
@@ -185,6 +207,7 @@ Open **Admin panel** from the sidebar (admins only).
 | **Services & plans** | Turn off whole services (airtime, data, electricity, cable, exam PINs, funding, transfers, withdrawals, airtime-to-cash), individual networks, plan types (e.g. MTN > Gifting), single data plans, electricity companies, cable providers and packages. **Maintenance mode** and a **notice banner** for all customers. Anything switched off disappears from the customer's dashboard within a minute |
 | **Withdrawals / Airtime to cash** | Review and approve or reject requests |
 | **Pricing & markup** | Your profit margins per service |
+| **Send a notice** | Type a title and message (optional button), choose all customers or one customer, and pick email, popup or both. Customers get the email (with your branding) and a popup the next time they open their dashboard. Past notices stay under "Notices" in their menu. **Send a test to me first.** Shows how many were emailed and popped up |
 | **Activity log** | Every login, failed login, order, payment, admin action and provider problem, searchable, with the provider's raw reply on order entries. Exports to CSV. Kept 90 days |
 | **System check** | Shows which settings are missing (email key, Flutterwave hash, provider key, wrong FRONTEND_URL, etc.) and the exact webhook URL to paste into Flutterwave |
 

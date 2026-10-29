@@ -14,8 +14,12 @@ const transferRoutes = require('./routes/transfer');
 const withdrawalRoutes = require('./routes/withdrawal');
 const airtimeToCashRoutes = require('./routes/airtime-to-cash');
 const webhookRoutes = require('./routes/webhooks');
+const publicRoutes = require('./routes/public');
+const notificationRoutes = require('./routes/notifications');
 const { settleAllPending } = require('./services/settle');
 const { requireService } = require('./middleware/services');
+const provider = require('./services/arrifqubundle');
+const { alertAdmin, money } = require('./services/notify');
 
 const app = express();
 
@@ -49,6 +53,8 @@ app.use(['/api/auth/forgot-password', '/api/auth/resend-verification'], emailLim
 app.use('/api/auth', authLimiter, authRoutes);
 
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/public', publicRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/transactions', transactionRoutes);
@@ -81,6 +87,21 @@ connectDB()
     });
     // The provider has no webhook, so check slow orders every 2 minutes.
     setInterval(() => settleAllPending().catch((e) => console.error('Settle sweep failed:', e.message)), 2 * 60 * 1000);
+
+    // Email the admins when the provider wallet runs low (checked every 20 minutes, emailed at most every 6 hours).
+    if (process.env.PROVIDER_MODE === 'live') {
+      const watchBalance = async () => {
+        const r = await provider.getBalance();
+        const threshold = Number(process.env.PROVIDER_LOW_BALANCE_ALERT || 10000);
+        if (r.ok && r.balance < threshold) {
+          alertAdmin({ key: 'provider-low-balance', level: 'critical', title: `Provider wallet is low: ${money(r.balance)}`, message: `Your Arrifqubundle wallet is below ${money(threshold)}. Top it up now, or customer orders will start failing.`, rows: [['Balance', money(r.balance)], ['Alert level', money(threshold)]], throttleMs: 6 * 60 * 60 * 1000 });
+        } else if (!r.ok) {
+          alertAdmin({ key: 'provider-balance-error', level: 'warning', title: 'Could not read the provider balance', message: r.message || 'The provider did not answer.', throttleMs: 6 * 60 * 60 * 1000 });
+        }
+      };
+      setTimeout(() => watchBalance().catch(() => {}), 60 * 1000);
+      setInterval(() => watchBalance().catch(() => {}), 20 * 60 * 1000);
+    }
   })
   .catch((err) => {
     console.error('Failed to connect to MongoDB:', err.message);

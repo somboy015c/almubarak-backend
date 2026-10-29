@@ -7,6 +7,7 @@ const { getOrCreatePricing } = require('../models/Pricing');
 const { requireAuth, requirePin } = require('../middleware/auth');
 const { generateRef } = require('../utils/helpers');
 const airtimeToCashProvider = require('../services/airtimeToCashProvider');
+const { notifyA2C, alertAdmin, money } = require('../services/notify');
 
 const router = express.Router();
 
@@ -49,7 +50,15 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
     transactionId: transaction.id
   });
 
+  const requester = await User.findOne({ id: req.user.id });
+  const info = { network, amountSent: numericAmount, cashValue };
+  const queued = () => {
+    notifyA2C(requester, { ...info, state: 'pending' });
+    alertAdmin({ key: `a2c:${request.id}`, level: 'info', title: `Airtime-to-cash request: ${money(numericAmount)} ${String(network).toUpperCase()}`, message: `${requester.fullName} says they sent airtime and is waiting for ${money(cashValue)}. Check that it arrived, then approve or reject it in Admin > Airtime to cash.`, rows: [['Customer', `${requester.fullName} (${requester.email})`], ['Network', String(network).toUpperCase()], ['Airtime sent', money(numericAmount)], ['Phone used', phoneUsed], ['Will be credited', money(cashValue)]] });
+  };
+
   if (chosenMethod === 'manual') {
+    queued();
     return res.json({
       message: `Request submitted for manual review. You'll receive ₦${cashValue.toLocaleString()} (${rate}% of face value) once an admin verifies it.`
     });
@@ -59,6 +68,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   const result = await airtimeToCashProvider.verify({ network, amountSent: numericAmount, phoneUsed });
 
   if (result.fellBackToManual) {
+    queued();
     return res.json({
       message: `No automatic verification provider is configured yet, so this was queued for manual review instead. You'll receive ₦${cashValue.toLocaleString()} once verified.`
     });
@@ -70,12 +80,11 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
     await request.save();
     transaction.status = 'failed';
     await transaction.save();
+    notifyA2C(requester, { ...info, state: 'failed', note: result.message });
     return res.status(422).json({ error: result.message || 'We could not verify that airtime was received.' });
   }
 
-  const user = await User.findOne({ id: req.user.id });
-  user.walletBalance = Number(user.walletBalance) + cashValue;
-  await user.save();
+  await User.updateOne({ id: req.user.id }, { $inc: { walletBalance: cashValue } });
 
   request.status = 'success';
   request.adminNote = 'Verified automatically';
@@ -83,6 +92,7 @@ router.post('/', requireAuth, requirePin, async (req, res) => {
   transaction.status = 'success';
   await transaction.save();
 
+  notifyA2C(requester, { ...info, state: 'success' });
   res.json({ message: `Verified! ₦${cashValue.toLocaleString()} has been added to your wallet.` });
 });
 

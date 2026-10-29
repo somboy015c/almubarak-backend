@@ -12,6 +12,10 @@ const { publicUser, round2 } = require('../utils/helpers');
 const { logEvent } = require('../utils/log');
 const { frontendUrl } = require('../utils/urls');
 const provider = require('../services/arrifqubundle');
+const Announcement = require('../models/Announcement');
+const Notification = require('../models/Notification');
+const { sendBrandedMany } = require('../services/email');
+const { notifyWalletAdjust, notifyAccountStatus, notifyWithdrawal, notifyA2C, alertAdmin, money } = require('../services/notify');
 
 const router = express.Router();
 router.use(requireAuth, requireAdmin);
@@ -284,6 +288,8 @@ router.post('/users/:id/wallet-adjust', async (req, res) => {
   });
   logEvent({ category: 'admin', level: 'warn', action: 'wallet.adjust', message: `Wallet ${numericAmount > 0 ? 'credited' : 'debited'} ${Math.abs(numericAmount)}: ${reason || 'no reason given'}`, actor: actorOf(req), user: { id: user.id, email: user.email }, meta: { amount: numericAmount, newBalance: user.walletBalance } });
 
+  notifyWalletAdjust(user, { amount: numericAmount, reason, balance: user.walletBalance });
+  alertAdmin({ level: 'info', title: `Wallet ${numericAmount > 0 ? 'credited' : 'debited'} by an admin: ${money(Math.abs(numericAmount))}`, message: `${req.user.fullName} changed a customer's wallet by hand. This email is your audit trail.`, rows: [['Admin', req.user.email], ['Customer', user.email], ['Amount', `${numericAmount > 0 ? '+' : '-'}${money(Math.abs(numericAmount))}`], ['Reason', reason || 'none given'], ['New balance', money(user.walletBalance)]] });
   res.json({ message: 'Wallet updated.', user: publicUser(user) });
 });
 
@@ -297,6 +303,8 @@ router.post('/users/:id/suspend', async (req, res) => {
   );
   if (!user) return res.status(404).json({ error: 'User not found.' });
   logEvent({ category: 'admin', level: 'warn', action: suspended ? 'user.suspend' : 'user.unsuspend', message: `${suspended ? 'Suspended' : 'Reactivated'} ${user.email}`, actor: actorOf(req), user: { id: user.id, email: user.email }, meta: { reason: req.body.reason || null } });
+  notifyAccountStatus(user, suspended, req.body.reason);
+  alertAdmin({ level: 'info', title: `Account ${suspended ? 'suspended' : 'reactivated'}: ${user.email}`, message: `${req.user.fullName} ${suspended ? 'suspended' : 'reactivated'} a customer account.`, rows: [['Admin', req.user.email], ['Customer', user.email], ['Reason', req.body.reason || '']] });
   res.json({ message: suspended ? 'Account suspended.' : 'Account reactivated.', user: publicUser(user) });
 });
 
@@ -306,6 +314,7 @@ router.post('/users/:id/admin', async (req, res) => {
   const user = await User.findOneAndUpdate({ id: req.params.id }, { isAdmin }, { new: true });
   if (!user) return res.status(404).json({ error: 'User not found.' });
   logEvent({ category: 'admin', level: 'warn', action: isAdmin ? 'user.make-admin' : 'user.remove-admin', message: `${isAdmin ? 'Granted' : 'Removed'} admin access for ${user.email}`, actor: actorOf(req), user: { id: user.id, email: user.email } });
+  alertAdmin({ level: 'warning', title: `Admin access ${isAdmin ? 'GRANTED to' : 'REMOVED from'} ${user.email}`, message: `${req.user.fullName} ${isAdmin ? 'gave full admin access to' : 'removed admin access from'} ${user.email}. If you did not expect this, secure your admin accounts now.`, rows: [['Changed by', req.user.email], ['Account', user.email]] });
   res.json({ message: isAdmin ? 'User is now an admin.' : 'Admin access removed.', user: publicUser(user) });
 });
 
@@ -336,6 +345,7 @@ router.post('/withdrawals/:id/approve', async (req, res) => {
   if (!withdrawal) return res.status(400).json({ error: 'Request not found or already processed.' });
   if (withdrawal.transactionId) await Transaction.findOneAndUpdate({ id: withdrawal.transactionId }, { status: 'success' });
   logEvent({ category: 'admin', action: 'withdrawal.approve', message: `Withdrawal of ${withdrawal.amount} marked paid`, actor: actorOf(req), user: { id: withdrawal.userId }, meta: { withdrawal: withdrawal.id } });
+  User.findOne({ id: withdrawal.userId }).then((u) => u && notifyWithdrawal(u, { state: 'success', amount: withdrawal.amount, bankName: withdrawal.bankName, accountNumber: withdrawal.accountNumber, accountName: withdrawal.accountName, balance: u.walletBalance }));
   res.json({ message: 'Withdrawal marked as paid.', withdrawal });
 });
 
@@ -346,8 +356,9 @@ router.post('/withdrawals/:id/reject', async (req, res) => {
     { new: true }
   );
   if (!withdrawal) return res.status(400).json({ error: 'Request not found or already processed.' });
-  await User.updateOne({ id: withdrawal.userId }, { $inc: { walletBalance: Number(withdrawal.amount) } }); // refund
+  const refunded = await User.findOneAndUpdate({ id: withdrawal.userId }, { $inc: { walletBalance: Number(withdrawal.amount) } }, { new: true }); // refund
   if (withdrawal.transactionId) await Transaction.findOneAndUpdate({ id: withdrawal.transactionId }, { status: 'failed' });
+  if (refunded) notifyWithdrawal(refunded, { state: 'failed', amount: withdrawal.amount, bankName: withdrawal.bankName, accountNumber: withdrawal.accountNumber, accountName: withdrawal.accountName, balance: refunded.walletBalance });
   logEvent({ category: 'admin', level: 'warn', action: 'withdrawal.reject', message: `Withdrawal of ${withdrawal.amount} rejected and refunded`, actor: actorOf(req), user: { id: withdrawal.userId }, meta: { withdrawal: withdrawal.id, note: req.body.note || null } });
   res.json({ message: 'Withdrawal rejected and wallet refunded.', withdrawal });
 });
@@ -364,8 +375,9 @@ router.post('/airtime-to-cash/:id/approve', async (req, res) => {
     { new: true }
   );
   if (!request) return res.status(400).json({ error: 'Request not found or already processed.' });
-  await User.updateOne({ id: request.userId }, { $inc: { walletBalance: Number(request.cashValue) } });
+  const credited = await User.findOneAndUpdate({ id: request.userId }, { $inc: { walletBalance: Number(request.cashValue) } }, { new: true });
   if (request.transactionId) await Transaction.findOneAndUpdate({ id: request.transactionId }, { status: 'success' });
+  if (credited) notifyA2C(credited, { state: 'success', network: request.network, amountSent: request.amountSent, cashValue: request.cashValue });
   logEvent({ category: 'admin', action: 'a2c.approve', message: `Airtime-to-cash of ${request.cashValue} credited`, actor: actorOf(req), user: { id: request.userId }, meta: { request: request.id } });
   res.json({ message: 'Request approved and wallet credited.', request });
 });
@@ -378,6 +390,7 @@ router.post('/airtime-to-cash/:id/reject', async (req, res) => {
   );
   if (!request) return res.status(400).json({ error: 'Request not found or already processed.' });
   if (request.transactionId) await Transaction.findOneAndUpdate({ id: request.transactionId }, { status: 'failed' });
+  User.findOne({ id: request.userId }).then((u) => u && notifyA2C(u, { state: 'failed', network: request.network, amountSent: request.amountSent, cashValue: request.cashValue, note: req.body.note }));
   logEvent({ category: 'admin', action: 'a2c.reject', message: 'Airtime-to-cash request rejected', actor: actorOf(req), user: { id: request.userId }, meta: { request: request.id, note: req.body.note || null } });
   res.json({ message: 'Request rejected.', request });
 });
@@ -410,6 +423,7 @@ router.put('/pricing', async (req, res) => {
   }
   const updated = await Pricing.findByIdAndUpdate('singleton', { $set: set }, { new: true });
   logEvent({ category: 'admin', action: 'pricing.update', message: 'Pricing changed', actor: actorOf(req), meta: set });
+  alertAdmin({ level: 'info', title: 'Pricing was changed', message: `${req.user.fullName} changed your pricing and markup.`, rows: [['Changed by', req.user.email], ...Object.entries(set).map(([k, v]) => [k, String(v)])] });
   res.json({ pricing: updated });
 });
 
@@ -437,7 +451,11 @@ router.get('/service-control', async (req, res) => {
   const exam = (await provider.getVariations('exam')).map((p) => ({ id: p.variation_code, name: p.name, amount: p.amount, on: off(s.disabledPlans, `exam:${p.variation_code}`) }));
 
   res.json({
-    site: { maintenance: s.maintenance, maintenanceMessage: s.maintenanceMessage, notice: s.notice },
+    site: {
+      maintenance: s.maintenance, maintenanceMessage: s.maintenanceMessage, notice: s.notice,
+      appDownloadEnabled: s.appDownloadEnabled, appDownloadUrl: s.appDownloadUrl,
+      emailOrders: s.emailOrders, emailLogins: s.emailLogins, emailAdminAlerts: s.emailAdminAlerts
+    },
     services: SERVICES.map((key) => ({ key, label: SERVICE_LABELS[key], on: off(s.disabledServices, key) })),
     networks: NETWORKS.map((key) => ({ key, on: off(s.disabledNetworks, key) })),
     cables, discos, exam, data: dataByNetwork
@@ -474,10 +492,134 @@ router.put('/site', async (req, res) => {
   if (req.body.maintenance !== undefined) set.maintenance = !!req.body.maintenance;
   if (req.body.maintenanceMessage !== undefined) set.maintenanceMessage = String(req.body.maintenanceMessage).slice(0, 300);
   if (req.body.notice !== undefined) set.notice = String(req.body.notice).slice(0, 300);
+  for (const k of ['appDownloadEnabled', 'emailOrders', 'emailLogins', 'emailAdminAlerts']) {
+    if (req.body[k] !== undefined) set[k] = !!req.body[k];
+  }
+  if (req.body.appDownloadUrl !== undefined) {
+    const url = String(req.body.appDownloadUrl).trim();
+    if (url && !/^https?:\/\/\S+$/i.test(url)) return res.status(400).json({ error: 'The app download link must start with http:// or https://' });
+    set.appDownloadUrl = url.slice(0, 500);
+  }
   await Settings.updateOne({ _id: 'site' }, { $set: set });
   clearSettingsCache();
   logEvent({ category: 'admin', level: 'warn', action: 'site.update', message: 'Site notice / maintenance settings changed', actor: actorOf(req), meta: set });
+  if (set.maintenance !== undefined) {
+    alertAdmin({ level: 'warning', title: `Maintenance mode turned ${set.maintenance ? 'ON' : 'OFF'}`, message: set.maintenance ? 'Customers cannot buy or pay until you turn it off again.' : 'Customers can buy and pay again.', rows: [['Changed by', req.user.email]] });
+  }
   res.json({ message: 'Saved.' });
+});
+
+// ============================================================ Announcements =======
+// Customers who can receive a notice: not suspended, and email verified (older accounts count as verified).
+const reachable = { suspended: { $ne: true }, emailVerified: { $ne: false } };
+
+function readNotice(body) {
+  const title = String(body.title || '').trim();
+  const message = String(body.message || '').trim();
+  const buttonText = String(body.buttonText || '').trim();
+  let buttonUrl = String(body.buttonUrl || '').trim();
+  if (!title || title.length > 100) return { error: 'Give the notice a title (up to 100 characters).' };
+  if (!message || message.length > 2000) return { error: 'Write the message (up to 2000 characters).' };
+  if (buttonText && !buttonUrl) return { error: 'A button needs a link.' };
+  if (buttonUrl && !/^https?:\/\/\S+$/i.test(buttonUrl) && !/^[a-z0-9\-\/]+\.html(\?\S*)?$/i.test(buttonUrl)) {
+    return { error: 'The button link must start with https:// or be a page of this site such as dashboard.html' };
+  }
+  if (buttonUrl && !buttonText) return { error: 'Add text for the button.' };
+  const sendEmail = body.sendEmail !== false;
+  const sendPopup = body.sendPopup !== false;
+  if (!sendEmail && !sendPopup) return { error: 'Choose email, popup, or both.' };
+  const audience = body.audience === 'user' ? 'user' : 'all';
+  const targetEmail = audience === 'user' ? String(body.email || '').trim().toLowerCase() : '';
+  if (audience === 'user' && !targetEmail) return { error: "Enter the customer's email address." };
+  return { notice: { title, message, buttonText, buttonUrl, sendEmail, sendPopup, audience, targetEmail } };
+}
+
+const absoluteUrl = (u) => (!u ? '' : /^https?:\/\//i.test(u) ? u : `${frontendUrl()}/${u.replace(/^\//, '')}`);
+
+function noticeEmail(user, n) {
+  const first = (user.fullName || '').split(' ')[0] || 'there';
+  return {
+    to: user.email,
+    subject: n.title,
+    tone: 'info',
+    title: n.title,
+    intro: `Hi ${first},\n\n${n.message}`,
+    button: n.buttonText ? { text: n.buttonText, url: absoluteUrl(n.buttonUrl) } : null,
+    notes: ['You are receiving this notice because you have an Elmubarak Digital Hub account.']
+  };
+}
+
+async function audienceUsers(n) {
+  if (n.audience === 'user') {
+    const u = await User.findOne({ email: n.targetEmail });
+    return u ? [u] : [];
+  }
+  return User.find(reachable);
+}
+
+router.get('/announcements/audience', async (req, res) => {
+  if (req.query.email) {
+    const u = await User.findOne({ email: String(req.query.email).trim().toLowerCase() });
+    return res.json({ count: u ? 1 : 0, name: u ? u.fullName : null });
+  }
+  res.json({ count: await User.countDocuments(reachable) });
+});
+
+router.get('/announcements', async (req, res) => {
+  const list = await Announcement.find({});
+  res.json({ announcements: list.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 50) });
+});
+
+// Send to yourself first to see exactly what customers will see.
+router.post('/announcements/test', async (req, res) => {
+  const { notice, error } = readNotice({ ...req.body, audience: 'all' });
+  if (error) return res.status(400).json({ error });
+  if (notice.sendPopup) {
+    await Notification.create({ id: uuidv4(), userId: req.user.id, announcementId: 'test', title: `[Test] ${notice.title}`, message: notice.message, buttonText: notice.buttonText, buttonUrl: notice.buttonUrl });
+  }
+  if (notice.sendEmail) {
+    await sendBrandedMany([{ ...noticeEmail(req.user, notice), subject: `[Test] ${notice.title}` }]);
+  }
+  res.json({ message: 'Test sent to you. Check your email and open your customer dashboard to see the popup.' });
+});
+
+router.post('/announcements', async (req, res) => {
+  const { notice, error } = readNotice(req.body);
+  if (error) return res.status(400).json({ error });
+
+  const users = await audienceUsers(notice);
+  if (!users.length) return res.status(404).json({ error: notice.audience === 'user' ? 'No customer found with that email.' : 'There are no customers to send to yet.' });
+
+  const ann = await Announcement.create({
+    id: uuidv4(), ...notice, createdBy: actorOf(req), status: 'sending',
+    stats: { recipients: users.length, popups: 0, emailsSent: 0, emailsFailed: 0 }
+  });
+  logEvent({ category: 'admin', level: 'warn', action: 'announcement.send', message: `Notice "${notice.title}" sent to ${users.length} customer(s)`, actor: actorOf(req), meta: { announcement: ann.id, email: notice.sendEmail, popup: notice.sendPopup, audience: notice.audience } });
+  res.status(202).json({ message: `Sending to ${users.length} customer${users.length === 1 ? '' : 's'}. This page will show the result in a moment.`, announcement: ann });
+
+  // The rest happens in the background so the page doesn't wait.
+  (async () => {
+    const stats = { recipients: users.length, popups: 0, emailsSent: 0, emailsFailed: 0 };
+    try {
+      if (notice.sendPopup) {
+        for (const u of users) {
+          await Notification.create({ id: uuidv4(), userId: u.id, announcementId: ann.id, title: notice.title, message: notice.message, buttonText: notice.buttonText, buttonUrl: notice.buttonUrl });
+          stats.popups += 1;
+        }
+      }
+      if (notice.sendEmail) {
+        const r = await sendBrandedMany(users.map((u) => noticeEmail(u, notice)));
+        stats.emailsSent = r.sent;
+        stats.emailsFailed = r.failed;
+      }
+    } catch (err) {
+      console.error('Announcement send error:', err.message);
+    }
+    await Announcement.updateOne({ id: ann.id }, { status: 'done', stats });
+    if (stats.emailsFailed) {
+      logEvent({ category: 'system', level: 'error', action: 'announcement.email.failed', message: `${stats.emailsFailed} notice email(s) could not be sent for "${notice.title}"`, meta: { announcement: ann.id } });
+    }
+  })();
 });
 
 // ============================================================ Logs ================

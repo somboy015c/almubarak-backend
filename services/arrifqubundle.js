@@ -362,7 +362,7 @@ async function purchase(kind, payload) {
 
   if (!process.env.ARRIFQU_API_KEY) {
     console.error('ARRIFQU_API_KEY is not set.');
-    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.', logMessage: 'ARRIFQU_API_KEY is not set' };
+    return { ok: false, state: 'failed', request_id, alertCode: 'CONFIG', message: 'This service is temporarily unavailable. Please try again shortly.', logMessage: 'ARRIFQU_API_KEY is not set' };
   }
 
   let body;
@@ -401,13 +401,13 @@ async function purchase(kind, payload) {
     }
   } catch (err) {
     console.error(`Arrifqubundle: cannot build ${kind} order:`, err.message);
-    return { ok: false, state: 'failed', request_id, message: 'This service is temporarily unavailable. Please try again shortly.', logMessage: err.message };
+    return { ok: false, state: 'failed', request_id, alertCode: 'CONFIG', message: 'This service is temporarily unavailable. Please try again shortly.', logMessage: err.message };
   }
 
   try {
     const { data } = await client().post(`/${PATH[kind]}/`, body);
     const r = interpret(data);
-    return { ok: r.state === 'success', request_id, ...r };
+    return { ok: r.state === 'success', request_id, ...r, alertCode: r.code === 'FORBIDDEN' ? 'FORBIDDEN' : undefined };
   } catch (err) {
     const status = err.response?.status;
     if (status && status >= 400 && status < 500) {
@@ -422,6 +422,7 @@ async function purchase(kind, payload) {
         ok: false,
         state: 'failed',
         request_id,
+        alertCode: status === 401 || status === 403 ? 'AUTH' : lowFunds ? 'LOW_FUNDS' : tooFast ? 'RATE_LIMIT' : undefined,
         message: tooFast
           ? 'Too many orders at once. Please wait a minute and try again. You have not been charged.'
           : lowFunds
@@ -433,7 +434,7 @@ async function purchase(kind, payload) {
     }
     // Timeout / network drop / 5xx: the order MAY have gone through. Don't refund yet.
     console.error('Arrifqubundle purchase: unclear outcome, marking pending:', status || err.message);
-    return { ok: false, state: 'pending', request_id, message: 'Your order is being processed.', logMessage: `No clear answer (${status || err.message})` };
+    return { ok: false, state: 'pending', request_id, alertCode: 'UNREACHABLE', message: 'Your order is being processed.', logMessage: `No clear answer (${status || err.message})` };
   }
 }
 
