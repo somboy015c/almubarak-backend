@@ -81,6 +81,8 @@ async function executePurchase({ userId, kind, price, description, payload, via 
       amount: price,
       status,
       reference: result.request_id,
+      token: extraMeta.token ? String(extraMeta.token) : null,
+      cards: extraMeta.cards || null,
       meta: { ...payload, via, providerId: result.providerId || null, providerCost: result.providerCost ?? null, ...extraMeta }
     });
 

@@ -29,7 +29,7 @@ async function settlePendingTransaction(tx) {
   if (r.state === 'success') {
     const updated = await Transaction.findOneAndUpdate(
       { id: tx.id, status: 'pending' },
-      { status: 'success', meta: { ...(tx.meta || {}), providerId: r.providerId || providerId || null, providerCost: r.providerCost ?? null, token: r.token || (tx.meta && tx.meta.token) || null } },
+      { status: 'success', token: r.token || tx.token || (tx.meta && tx.meta.token) || null, cards: r.cards || tx.cards || null, meta: { ...(tx.meta || {}), providerId: r.providerId || providerId || null, providerCost: r.providerCost ?? null, token: r.token || (tx.meta && tx.meta.token) || null } },
       { new: true }
     );
     if (updated) {

@@ -177,6 +177,17 @@ async function cableEntry(provider) {
   return fromUser ? { id: fromUser.id, entry: null } : null;
 }
 
+async function getNetworks() {
+  const labels = { mtn: 'MTN', glo: 'GLO', airtel: 'Airtel', '9mobile': '9mobile' };
+  if (!isLive()) return Object.keys(labels).map((k, i) => ({ key: k, label: labels[k], id: String(i + 1) }));
+  const out = [];
+  for (const k of Object.keys(labels)) {
+    const n = await networkEntry(k).catch(() => null);
+    out.push({ key: k, label: labels[k], id: n && n.id !== undefined ? String(n.id) : null });
+  }
+  return out;
+}
+
 async function getDiscos() {
   if (!isLive()) return MOCK.discos;
   const base = await getBase();
@@ -532,4 +543,4 @@ async function diagnostics() {
   }
 }
 
-module.exports = { getVariations, getDiscos, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK };
+module.exports = { getVariations, getDiscos, getNetworks, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK };

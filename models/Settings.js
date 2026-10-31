@@ -22,6 +22,9 @@ const settingsSchema = new mongoose.Schema({
   appDownloadEnabled: { type: Boolean, default: true },
   appDownloadUrl: { type: String, default: '' }, // empty = use the link in the website's config.js
 
+  // Airtime to cash (manual): the owner's receiving number for each network. A network left empty is not offered.
+  a2cLines: { type: mongoose.Schema.Types.Mixed, default: () => ({ mtn: '', airtel: '', glo: '', '9mobile': '' }) },
+
   // Emails
   emailOrders: { type: Boolean, default: true }, // order / payment / withdrawal emails to customers
   emailLogins: { type: Boolean, default: true }, // "new login" security email to customers

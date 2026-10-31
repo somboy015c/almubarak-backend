@@ -204,9 +204,11 @@ Open **Admin panel** from the sidebar (admins only).
 | **Transactions** | Search by reference, customer name, email or phone. Filter by type, status and dates. Click a row for full details (provider charge, profit, token). Export to CSV. **Mark paid / Refund** for orders stuck on processing |
 | **Users** | Search customers, see their orders and spending, **adjust wallet**, **suspend / reactivate**, make or remove admins |
 | **Services & plans** | Turn off whole services (airtime, data, electricity, cable, exam PINs, funding, transfers, withdrawals, airtime-to-cash), individual networks, plan types (e.g. MTN > Gifting), single data plans, electricity companies, cable providers and packages. **Maintenance mode** and a **notice banner** for all customers. Anything switched off disappears from the customer's dashboard within a minute |
+| **Flutterwave payments** | Every payment customers made through Flutterwave, with totals (successful, average, pending, failed, success rate, today / 7 / 30 days), filters, search, CSV export, and a **Re-check** button that asks Flutterwave again and credits the customer once if it was really paid |
+| **Airtime to cash setup** | The number customers send airtime to, per network (empty = that network is not offered), and the payout rate. Customer flow: choose line, amount, see payout, Proceed, see your number, send, tick "I have sent the airtime", place request; you are emailed with the details |
+| **Pricing & markup** | Your markups, plus collapsible price lists (airtime, data per network, cable per provider, electricity, exam PINs) showing supplier IDs, supplier price, your website price and profit |
 | **Withdrawals** | Customers request a withdrawal and the money is held from their wallet. You see the bank details (with a Copy button), send the money yourself, then click **Mark paid** (add your payment reference) or **Reject** (refunds the wallet). **Start processing** is optional and tells the customer it is on its way. Customer and admins are emailed at every step, and the customer sees the status under Withdraw |
 | **Airtime to cash** | Review each request, confirm the airtime arrived, then **Approve** or **Reject**. The automatic option is OFF (it is not connected to any provider) |
-| **Pricing & markup** | Your profit margins per service |
 | **Send a notice** | Type a title and message (optional button), choose all customers or one customer, and pick email, popup or both. Customers get the email (with your branding) and a popup the next time they open their dashboard. Past notices stay under "Notices" in their menu. **Send a test to me first.** Shows how many were emailed and popped up |
 | **Activity log** | Every login, failed login, order, payment, admin action and provider problem, searchable, with the provider's raw reply on order entries. Exports to CSV. Kept 90 days |
 | **System check** | Shows which settings are missing (email key, Flutterwave hash, provider key, wrong FRONTEND_URL, etc.) and the exact webhook URL to paste into Flutterwave |
@@ -266,3 +268,9 @@ payment is credited to their wallet and the order runs straight away. If the ord
 - `CLIENT_ORIGIN` lists only your real domains.
 - Keys in Render are **live** keys only after testing is complete; never paste keys, tokens or API documentation containing them into chats, screenshots or repositories.
 - Keep Render, Atlas, Resend, Arrifqubundle and Flutterwave logins protected with 2-factor authentication.
+
+
+---
+
+## Notes on PINs and tokens
+Electricity tokens and exam PINs are stored with the transaction, so customers can always find them again under **History** (filter *PINs & tokens*, then *View PIN / token*). Admins can see them in Transactions details, so treat them as private.

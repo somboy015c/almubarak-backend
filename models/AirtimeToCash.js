@@ -7,6 +7,8 @@ const airtimeToCashSchema = new mongoose.Schema({
   amountSent: { type: Number, required: true }, // face value the user claims to have sent
   cashValue: { type: Number, required: true },  // what they'll be credited if approved
   phoneUsed: { type: String, required: true },  // the line the airtime was sent from
+  sendToNumber: { type: String, default: '' },   // the owner's line the customer was told to send it TO (manual mode)
+  customerConfirmed: { type: Boolean, default: false }, // the customer ticked "I have sent the airtime"
   // 'manual' -> an admin checks their VTU balance and approves by hand;
   // 'automatic' -> an external verification API is called immediately
   method: { type: String, enum: ['manual', 'automatic'], default: 'manual' },

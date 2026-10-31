@@ -8,13 +8,15 @@ const Log = require('../models/Log');
 const { getOrCreatePricing, Pricing } = require('../models/Pricing');
 const { Settings, getSettings, clearSettingsCache, SERVICES } = require('../models/Settings');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
-const { publicUser, round2 } = require('../utils/helpers');
+const { publicUser, round2, applyMarkup } = require('../utils/helpers');
 const { logEvent } = require('../utils/log');
 const { frontendUrl } = require('../utils/urls');
 const provider = require('../services/arrifqubundle');
 const Announcement = require('../models/Announcement');
 const Notification = require('../models/Notification');
 const { sendBrandedMany } = require('../services/email');
+const Funding = require('../models/Funding');
+const { settleFunding } = require('../services/funding');
 const { notifyWalletAdjust, notifyAccountStatus, notifyWithdrawal, notifyA2C, alertAdmin, money } = require('../services/notify');
 
 const router = express.Router();
@@ -451,6 +453,161 @@ router.put('/pricing', async (req, res) => {
   logEvent({ category: 'admin', action: 'pricing.update', message: 'Pricing changed', actor: actorOf(req), meta: set });
   alertAdmin({ level: 'info', title: 'Pricing was changed', message: `${req.user.fullName} changed your pricing and markup.`, rows: [['Changed by', req.user.email], ...Object.entries(set).map(([k, v]) => [k, String(v)])] });
   res.json({ pricing: updated });
+});
+
+// ============================================================ Flutterwave payments ==
+// Every payment a customer started through Flutterwave: wallet top-ups and "pay with card" checkouts.
+const PAY_STATUS = ['success', 'pending', 'failed'];
+
+async function paymentFilter(req) {
+  const filter = { ...dateRange(req) };
+  const { status, kind, q } = req.query;
+  if (PAY_STATUS.includes(status)) filter.status = status;
+  if (kind === 'topup') filter.order = null; // matches payments with no order attached
+  else if (kind === 'order') filter.order = { $ne: null };
+  if (q) {
+    const text = String(q).trim();
+    const rx = new RegExp(esc(text), 'i');
+    const users = await User.find({ $or: [{ email: rx }, { fullName: rx }, { phone: rx }] }).select('id').limit(200);
+    filter.$or = [{ reference: rx }, { 'order.description': rx }, { userId: { $in: users.map((u) => u.id) } }];
+    if (/^\d+(\.\d+)?$/.test(text)) filter.$or.push({ amount: Number(text) });
+  }
+  return filter;
+}
+
+async function withPaymentUsers(rows) {
+  const ids = [...new Set(rows.map((p) => p.userId))];
+  const users = await User.find({ id: { $in: ids } }).select('id fullName email phone');
+  const map = Object.fromEntries(users.map((u) => [u.id, u]));
+  return rows.map((p) => {
+    const o = p.toObject ? p.toObject() : p;
+    const u = map[o.userId];
+    return {
+      id: o.id, reference: o.reference, amount: o.amount, status: o.status, createdAt: o.createdAt,
+      kind: o.order ? 'order' : 'topup',
+      forOrder: o.order ? o.order.description : '',
+      orderState: o.orderResult ? o.orderResult.state : (o.order ? o.orderStatus : ''),
+      userName: u ? u.fullName : 'Unknown user', userEmail: u ? u.email : '', userPhone: u ? u.phone : ''
+    };
+  });
+}
+
+router.get('/payments', async (req, res) => {
+  const { page, limit, skip } = paging(req);
+  const filter = await paymentFilter(req);
+
+  const byStatus = await Funding.aggregate([{ $match: filter }, { $group: { _id: '$status', count: { $sum: 1 }, sum: { $sum: '$amount' }, max: { $max: '$amount' } } }]);
+  const pick = (s) => byStatus.find((r) => r._id === s) || { count: 0, sum: 0, max: 0 };
+  const ok = pick('success'), wait = pick('pending'), bad = pick('failed');
+
+  const kinds = await Funding.aggregate([
+    { $match: { ...filter, status: 'success' } },
+    { $group: { _id: { $cond: [{ $eq: [{ $ifNull: ['$order', null] }, null] }, 'topup', 'order'] }, count: { $sum: 1 }, sum: { $sum: '$amount' } } }
+  ]);
+  const kindOf = (k) => kinds.find((r) => r._id === k) || { count: 0, sum: 0 };
+
+  const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
+  const windows = {};
+  for (const [name, since] of [['today', startToday], ['week', new Date(Date.now() - 7 * 864e5)], ['month', new Date(Date.now() - 30 * 864e5)]]) {
+    const a = await Funding.aggregate([{ $match: { status: 'success', createdAt: { $gte: since } } }, { $group: { _id: null, count: { $sum: 1 }, sum: { $sum: '$amount' } } }]);
+    windows[name] = { count: a[0]?.count || 0, sum: round2(a[0]?.sum || 0) };
+  }
+
+  const [total, rows] = await Promise.all([Funding.countDocuments(filter), Funding.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)]);
+  const finished = ok.count + bad.count;
+  res.json({
+    payments: await withPaymentUsers(rows), total, page, pages: Math.max(Math.ceil(total / limit), 1),
+    stats: {
+      successful: { count: ok.count, sum: round2(ok.sum), average: ok.count ? round2(ok.sum / ok.count) : 0, largest: round2(ok.max || 0) },
+      pending: { count: wait.count, sum: round2(wait.sum) },
+      failed: { count: bad.count, sum: round2(bad.sum) },
+      successRate: finished ? Math.round((ok.count / finished) * 100) : null,
+      topups: { count: kindOf('topup').count, sum: round2(kindOf('topup').sum) },
+      orderPayments: { count: kindOf('order').count, sum: round2(kindOf('order').sum) },
+      windows
+    }
+  });
+});
+
+router.get('/payments.csv', async (req, res) => {
+  const rows = await withPaymentUsers(await Funding.find(await paymentFilter(req)).sort({ createdAt: -1 }).limit(5000));
+  sendCsv(res, 'flutterwave-payments.csv', ['Date', 'Reference', 'Customer', 'Email', 'Type', 'For', 'Amount', 'Status', 'Order result'],
+    rows.map((p) => [new Date(p.createdAt).toISOString(), p.reference, p.userName, p.userEmail, p.kind === 'order' ? 'Order payment' : 'Wallet top-up', p.forOrder, p.amount, p.status, p.orderState]));
+});
+
+// Ask Flutterwave again about one payment. If it was really paid, the customer is credited (once) and told.
+router.post('/payments/:reference/recheck', async (req, res) => {
+  const f = await Funding.findOne({ reference: req.params.reference });
+  if (!f) return res.status(404).json({ error: 'Payment not found.' });
+  const before = f.status;
+  const r = await settleFunding(f.reference);
+  logEvent({ category: 'admin', action: 'payment.recheck', message: `Re-checked payment ${f.reference}: ${r.state}`, actor: actorOf(req), user: { id: f.userId }, meta: { before, after: r.state } });
+  const message =
+    r.state === 'success' ? (before === 'success' ? 'Flutterwave confirms this payment, and it was already credited.' : 'Flutterwave confirms the payment. The customer has now been credited.')
+    : r.state === 'pending' ? 'Flutterwave has no completed payment for this reference yet.'
+    : 'Flutterwave says this payment did not succeed (or the amount did not match).';
+  res.json({ state: r.state, message });
+});
+
+// ============================================================ Airtime-to-cash setup ====
+const A2C_NETWORKS = ['mtn', 'airtel', 'glo', '9mobile'];
+const cleanLine = (p) => {
+  const digits = String(p || '').replace(/[^\d+]/g, '');
+  const m = digits.match(/^(?:\+?234|0)?([789][01]\d{8})$/);
+  return m ? `0${m[1]}` : null;
+};
+
+router.get('/a2c-setup', async (req, res) => {
+  const [s, pricing] = await Promise.all([getSettings(true), getOrCreatePricing()]);
+  res.json({ lines: Object.fromEntries(A2C_NETWORKS.map((n) => [n, (s.a2cLines && s.a2cLines[n]) || ''])), ratePercent: pricing.airtimeToCash.ratePercent });
+});
+
+router.put('/a2c-setup', async (req, res) => {
+  const lines = {};
+  for (const n of A2C_NETWORKS) {
+    const raw = String((req.body.lines || {})[n] || '').trim();
+    if (!raw) { lines[n] = ''; continue; }
+    const ok = cleanLine(raw);
+    if (!ok) return res.status(400).json({ error: `The ${n.toUpperCase()} number is not a valid Nigerian phone number.` });
+    lines[n] = ok;
+  }
+  await getSettings();
+  const before = (await getSettings(true)).a2cLines || {};
+  await Settings.updateOne({ _id: 'site' }, { $set: { a2cLines: lines } });
+  if (req.body.ratePercent !== undefined) {
+    const rate = Number(req.body.ratePercent);
+    if (!Number.isFinite(rate) || rate < 1 || rate > 100) return res.status(400).json({ error: 'The rate must be between 1 and 100.' });
+    await getOrCreatePricing();
+    await Pricing.findByIdAndUpdate('singleton', { $set: { 'airtimeToCash.ratePercent': rate } });
+  }
+  clearSettingsCache();
+  const changed = A2C_NETWORKS.filter((n) => (before[n] || '') !== lines[n]);
+  logEvent({ category: 'admin', level: 'warn', action: 'a2c.setup', message: 'Airtime-to-cash receiving numbers changed', actor: actorOf(req), meta: { changed, lines } });
+  if (changed.length) {
+    alertAdmin({ level: 'warning', title: 'Airtime-to-cash receiving numbers were changed', message: `${req.user.fullName} changed the number customers send airtime to. Customers will now be told to send airtime to these numbers, so make sure they are YOURS.`, rows: [['Changed by', req.user.email], ...A2C_NETWORKS.map((n) => [n.toUpperCase(), lines[n] || '(not offered)'])] });
+  }
+  res.json({ message: 'Saved. Customers will only see the networks that have a number.', lines });
+});
+
+// ============================================================ Price lists (supplier price vs your price) ====
+router.get('/pricing/catalog', async (req, res) => {
+  const pricing = await getOrCreatePricing();
+  const mk = (list, pct) => list.map((p) => ({ id: p.variation_code, name: p.name, category: p.category || '', supplierPrice: p.amount, price: applyMarkup(p.amount, pct) }));
+
+  const data = {};
+  for (const n of NETWORKS) data[n] = mk(await provider.getVariations('data', n), pricing.data.markupPercent);
+  const cable = {};
+  for (const c of CABLES) cable[c] = mk(await provider.getVariations('cable', c), pricing.cable.markupPercent);
+  const exam = (await provider.getVariations('exam')).map((p) => ({ id: p.variation_code, name: p.name, category: '', supplierPrice: p.amount, price: round2(p.amount + pricing.exam.flatFee) }));
+
+  res.json({
+    markups: { airtime: pricing.airtime.markupPercent, data: pricing.data.markupPercent, electricity: pricing.electricity.markupPercent, cable: pricing.cable.markupPercent, examFlatFee: pricing.exam.flatFee },
+    networks: await provider.getNetworks(),
+    discos: await provider.getDiscos(),
+    airtimeExamples: [100, 500, 1000, 5000].map((a) => ({ face: a, price: applyMarkup(a, pricing.airtime.markupPercent) })),
+    electricityExamples: [1000, 5000, 10000, 20000].map((a) => ({ face: a, price: applyMarkup(a, pricing.electricity.markupPercent) })),
+    data, cable, exam
+  });
 });
 
 // ============================================================ Services & plans ====
