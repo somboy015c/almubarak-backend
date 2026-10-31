@@ -251,7 +251,8 @@ payment is credited to their wallet and the order runs straight away. If the ord
 | Symptom | Likely cause / fix |
 |---|---|
 | Emails never arrive | Resend domain not **Verified** yet; wrong `RESEND_API_KEY`; check Render logs for "Resend error"; check spam |
-| Verification link goes to wrong site | `FRONTEND_URL` wrong in Render |
+| Verification link goes to wrong site, or System check shows "Website address" in red | `FRONTEND_URL` holds more than one address. Set it to exactly `https://elmubarak.com.ng` (one address, no comma, no spaces, no trailing slash). Several addresses belong only in `CLIENT_ORIGIN` |
+| Customers are logged out by themselves | By design: everyone is logged out after 15 minutes without clicking, typing or scrolling (a warning shows in the last minute) |
 | Browser shows CORS error | `CLIENT_ORIGIN` missing `https://elmubarak.com.ng` (and `www`) |
 | "Could not reach the server" | `API_BASE_URL` in `js/config.js` wrong, or Render is waking up (free tier) |
 | Admin balance card says the provider rejected the key | Wrong or regenerated `ARRIFQU_API_KEY`, or the token has a stray space |

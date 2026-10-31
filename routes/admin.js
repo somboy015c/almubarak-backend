@@ -163,7 +163,7 @@ router.get('/system', async (req, res) => {
     { label: 'Flutterwave secret key', value: process.env.FLW_SECRET_KEY ? 'set' : 'missing', ok: !!process.env.FLW_SECRET_KEY },
     { label: 'Flutterwave webhook secret hash', value: process.env.FLW_SECRET_HASH ? 'set' : 'missing: payments will not auto-credit', ok: !!process.env.FLW_SECRET_HASH },
     { label: 'JWT secret strength', value: (process.env.JWT_SECRET || '').length >= 32 ? 'ok' : 'too short, use 32+ random characters', ok: (process.env.JWT_SECRET || '').length >= 32 },
-    { label: 'Website address used in emails (FRONTEND_URL)', value: frontendUrl() + (/[,\s]/.test(raw.trim()) ? '  (your setting lists several addresses; use only one)' : ''), ok: !/[,\s]/.test(raw.trim()) && /^https:\/\//.test(frontendUrl()) },
+    { label: 'Website address used in emails (FRONTEND_URL)', value: frontendUrl() + (/[,\s]/.test(raw.trim()) ? '  FIX: the FRONTEND_URL setting contains more than one address. Edit it in your hosting settings so it holds only https://elmubarak.com.ng (no comma, no spaces), save, and let the server restart.' : ''), ok: !/[,\s]/.test(raw.trim()) && /^https:\/\//.test(frontendUrl()) },
     { label: 'Flutterwave webhook URL to paste in Flutterwave', value: api ? `${api}/api/webhooks/flutterwave` : 'set API_PUBLIC_URL first', ok: !!api }
   ];
   res.json({ checks });
