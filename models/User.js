@@ -20,6 +20,12 @@ const userSchema = new mongoose.Schema({
   verifyTokenExpires: { type: Date, default: null },
   verifyEmailSentAt: { type: Date, default: null },
 
+  // 6-digit email code used at sign-up (only an HMAC of the code is stored)
+  otpHash: { type: String, default: null },
+  otpExpires: { type: Date, default: null },
+  otpAttempts: { type: Number, default: 0 },
+  otpSentAt: { type: Date, default: null },
+
   // Password reset (single-use, short-lived; only the SHA-256 hash is stored)
   resetTokenHash: { type: String, default: null },
   resetTokenExpires: { type: Date, default: null },

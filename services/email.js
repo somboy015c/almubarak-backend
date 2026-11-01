@@ -142,7 +142,7 @@ function sendBranded(opts) {
   if (!recipients.length) return Promise.resolve({ ok: false, skipped: true });
 
   if (!process.env.RESEND_API_KEY) {
-    console.log(`[email:dev] RESEND_API_KEY not set. Would send "${opts.subject}" to ${recipients.join(', ')}${opts.button ? `\n  Link: ${opts.button.url}` : ''}`);
+    console.log(`[email:dev] RESEND_API_KEY not set. Would send "${opts.subject}" to ${recipients.join(', ')}${opts.button ? `\n  Link: ${opts.button.url}` : ''}${opts.token ? `\n  ${opts.token.label}: ${opts.token.value}` : ''}`);
     return Promise.resolve({ ok: true, dev: true });
   }
 
@@ -223,6 +223,21 @@ function sendVerificationEmail(user, rawToken) {
   });
 }
 
+// Sign-up code. The customer types it into the sign-up window, so there is no link.
+function sendOtpEmail(user, code) {
+  const first = (user.fullName || '').split(' ')[0] || 'there';
+  return sendBranded({
+    to: user.email,
+    subject: `${code} is your ${BRAND} verification code`,
+    tone: 'info',
+    title: 'Confirm your email',
+    intro: `Hi ${first}, enter this code on the sign-up page to confirm your email and finish creating your account. The code works for 10 minutes.`,
+    token: { label: 'Your 6-digit code', value: `${code.slice(0, 3)} ${code.slice(3)}` },
+    notes: ['Never share this code with anyone. Elmubarak staff will never ask you for it. If you did not try to sign up, you can ignore this email.'],
+    preheader: `Your code is ${code}`
+  });
+}
+
 function sendPasswordResetEmail(user, rawToken) {
   const link = `${frontendUrl()}/reset-password.html?token=${rawToken}`;
   return sendBranded({
@@ -237,4 +252,4 @@ function sendPasswordResetEmail(user, rawToken) {
   });
 }
 
-module.exports = { sendBranded, sendBrandedMany, sendVerificationEmail, sendPasswordResetEmail, BRAND };
+module.exports = { sendBranded, sendBrandedMany, sendVerificationEmail, sendOtpEmail, sendPasswordResetEmail, BRAND };

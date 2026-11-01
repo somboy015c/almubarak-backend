@@ -456,89 +456,107 @@ router.put('/pricing', async (req, res) => {
 });
 
 // ============================================================ Flutterwave payments ==
-// Every payment a customer started through Flutterwave: wallet top-ups and "pay with card" checkouts.
-const PAY_STATUS = ['success', 'pending', 'failed'];
+// This page reads Flutterwave's OWN transaction list (the same transactions as on Flutterwave's dashboard)
+// and every statistic is calculated from those transactions. Our own records are only used to show
+// whether each payment has been credited on the website.
+const flutterwave = require('../services/flutterwave');
+const PAY_TYPE_LABEL = { card: 'Card', account: 'Bank account', banktransfer: 'Bank transfer', ussd: 'USSD', mobilemoney: 'Mobile money', nqr: 'NQR' };
+const payTypeLabel = (t) => PAY_TYPE_LABEL[t] || (t ? t : 'Other');
+const ymd = (d) => new Date(d).toISOString().slice(0, 10);
 
-async function paymentFilter(req) {
-  const filter = { ...dateRange(req) };
-  const { status, kind, q } = req.query;
-  if (PAY_STATUS.includes(status)) filter.status = status;
-  if (kind === 'topup') filter.order = null; // matches payments with no order attached
-  else if (kind === 'order') filter.order = { $ne: null };
-  if (q) {
-    const text = String(q).trim();
-    const rx = new RegExp(esc(text), 'i');
-    const users = await User.find({ $or: [{ email: rx }, { fullName: rx }, { phone: rx }] }).select('id').limit(200);
-    filter.$or = [{ reference: rx }, { 'order.description': rx }, { userId: { $in: users.map((u) => u.id) } }];
-    if (/^\d+(\.\d+)?$/.test(text)) filter.$or.push({ amount: Number(text) });
-  }
-  return filter;
+function flwRange(req) {
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : ymd(Date.now());
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : ymd(Date.now() - 6 * 864e5);
+  const days = (new Date(to) - new Date(from)) / 864e5;
+  if (days < 0) return { error: 'The "From" date must be before the "To" date.' };
+  if (days > 92) return { error: 'Choose a range of 92 days or less.' };
+  return { from, to };
 }
 
-async function withPaymentUsers(rows) {
-  const ids = [...new Set(rows.map((p) => p.userId))];
-  const users = await User.find({ id: { $in: ids } }).select('id fullName email phone');
-  const map = Object.fromEntries(users.map((u) => [u.id, u]));
-  return rows.map((p) => {
-    const o = p.toObject ? p.toObject() : p;
-    const u = map[o.userId];
-    return {
-      id: o.id, reference: o.reference, amount: o.amount, status: o.status, createdAt: o.createdAt,
-      kind: o.order ? 'order' : 'topup',
-      forOrder: o.order ? o.order.description : '',
-      orderState: o.orderResult ? o.orderResult.state : (o.order ? o.orderStatus : ''),
-      userName: u ? u.fullName : 'Unknown user', userEmail: u ? u.email : '', userPhone: u ? u.phone : ''
-    };
+async function loadFlwRows(req) {
+  if (process.env.PROVIDER_MODE !== 'live') return { mock: true };
+  if (!process.env.FLW_SECRET_KEY) return { error: 'FLW_SECRET_KEY is not set on the server.' };
+  const range = flwRange(req);
+  if (range.error) return { error: range.error };
+
+  const q = String(req.query.q || '').trim();
+  const apiStatus = ['successful', 'failed'].includes(req.query.status) ? req.query.status : '';
+  let result;
+  try {
+    result = await flutterwave.fetchAllTransactions({ from: range.from, to: range.to, status: apiStatus, email: q.includes('@') ? q.toLowerCase() : '' }, { fresh: req.query.refresh === '1' });
+  } catch (err) {
+    return { error: err.message };
+  }
+
+  let rows = result.rows;
+  if (req.query.status === 'pending') rows = rows.filter((r) => r.status !== 'successful' && r.status !== 'failed');
+  if (req.query.type) rows = rows.filter((r) => r.paymentType === req.query.type);
+  if (q && !q.includes('@')) {
+    const needle = q.toLowerCase();
+    rows = rows.filter((r) => [r.txRef, r.flwRef, r.customerName, r.customerEmail, r.customerPhone, r.narration, String(r.amount)].some((v) => String(v || '').toLowerCase().includes(needle)));
+  }
+  rows = rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return { rows, range, meta: result };
+}
+
+function flwStats(rows) {
+  const ok = rows.filter((r) => r.status === 'successful');
+  const bad = rows.filter((r) => r.status === 'failed');
+  const wait = rows.filter((r) => r.status !== 'successful' && r.status !== 'failed');
+  const sum = (list, f = 'amount') => round2(list.reduce((t, r) => t + r[f], 0));
+  const methods = {};
+  ok.forEach((r) => { const k = payTypeLabel(r.paymentType); methods[k] = methods[k] || { method: k, count: 0, sum: 0 }; methods[k].count += 1; methods[k].sum = round2(methods[k].sum + r.amount); });
+  const finished = ok.length + bad.length;
+  return {
+    total: rows.length,
+    successful: { count: ok.length, sum: sum(ok), average: ok.length ? round2(sum(ok) / ok.length) : 0, largest: ok.length ? Math.max(...ok.map((r) => r.amount)) : 0, fees: sum(ok, 'fee') },
+    failed: { count: bad.length, sum: sum(bad) },
+    pending: { count: wait.length, sum: sum(wait) },
+    successRate: finished ? Math.round((ok.length / finished) * 100) : null,
+    methods: Object.values(methods).sort((a, b) => b.sum - a.sum)
+  };
+}
+
+// Is each Flutterwave payment credited on the website?
+async function withWebsiteState(rows) {
+  const refs = rows.map((r) => r.txRef).filter(Boolean);
+  const funds = refs.length ? await Funding.find({ reference: { $in: refs } }) : [];
+  const map = Object.fromEntries(funds.map((f) => [f.reference, f]));
+  return rows.map((r) => {
+    const f = map[r.txRef];
+    return { ...r, typeLabel: payTypeLabel(r.paymentType), website: !f ? 'other' : f.status === 'success' ? 'credited' : 'not-credited', forOrder: f && f.order ? f.order.description : '' };
   });
 }
 
-router.get('/payments', async (req, res) => {
+router.get('/flutterwave/transactions', async (req, res) => {
+  const r = await loadFlwRows(req);
+  if (r.mock) return res.json({ mock: true, transactions: [], total: 0, page: 1, pages: 1, stats: flwStats([]), note: 'The website is in MOCK mode, so it is not connected to Flutterwave. Set PROVIDER_MODE=live with your Flutterwave keys.' });
+  if (r.error) return res.status(502).json({ error: r.error });
+
   const { page, limit, skip } = paging(req);
-  const filter = await paymentFilter(req);
-
-  const byStatus = await Funding.aggregate([{ $match: filter }, { $group: { _id: '$status', count: { $sum: 1 }, sum: { $sum: '$amount' }, max: { $max: '$amount' } } }]);
-  const pick = (s) => byStatus.find((r) => r._id === s) || { count: 0, sum: 0, max: 0 };
-  const ok = pick('success'), wait = pick('pending'), bad = pick('failed');
-
-  const kinds = await Funding.aggregate([
-    { $match: { ...filter, status: 'success' } },
-    { $group: { _id: { $cond: [{ $eq: [{ $ifNull: ['$order', null] }, null] }, 'topup', 'order'] }, count: { $sum: 1 }, sum: { $sum: '$amount' } } }
-  ]);
-  const kindOf = (k) => kinds.find((r) => r._id === k) || { count: 0, sum: 0 };
-
-  const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
-  const windows = {};
-  for (const [name, since] of [['today', startToday], ['week', new Date(Date.now() - 7 * 864e5)], ['month', new Date(Date.now() - 30 * 864e5)]]) {
-    const a = await Funding.aggregate([{ $match: { status: 'success', createdAt: { $gte: since } } }, { $group: { _id: null, count: { $sum: 1 }, sum: { $sum: '$amount' } } }]);
-    windows[name] = { count: a[0]?.count || 0, sum: round2(a[0]?.sum || 0) };
-  }
-
-  const [total, rows] = await Promise.all([Funding.countDocuments(filter), Funding.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)]);
-  const finished = ok.count + bad.count;
+  const pageRows = await withWebsiteState(r.rows.slice(skip, skip + limit));
+  const notCredited = r.rows.filter((x) => x.status === 'successful').length
+    ? (await withWebsiteState(r.rows.filter((x) => x.status === 'successful'))).filter((x) => x.website === 'not-credited').length : 0;
+  const balance = await flutterwave.getNgnBalance();
   res.json({
-    payments: await withPaymentUsers(rows), total, page, pages: Math.max(Math.ceil(total / limit), 1),
-    stats: {
-      successful: { count: ok.count, sum: round2(ok.sum), average: ok.count ? round2(ok.sum / ok.count) : 0, largest: round2(ok.max || 0) },
-      pending: { count: wait.count, sum: round2(wait.sum) },
-      failed: { count: bad.count, sum: round2(bad.sum) },
-      successRate: finished ? Math.round((ok.count / finished) * 100) : null,
-      topups: { count: kindOf('topup').count, sum: round2(kindOf('topup').sum) },
-      orderPayments: { count: kindOf('order').count, sum: round2(kindOf('order').sum) },
-      windows
-    }
+    transactions: pageRows, total: r.rows.length, page, pages: Math.max(Math.ceil(r.rows.length / limit), 1),
+    stats: flwStats(r.rows), range: r.range, notCredited, balance,
+    truncated: r.meta.truncated, fetchedAt: r.meta.fetchedAt, totalAtFlutterwave: r.meta.totalAtFlutterwave, fieldsSeen: r.meta.fieldsSeen
   });
 });
 
-router.get('/payments.csv', async (req, res) => {
-  const rows = await withPaymentUsers(await Funding.find(await paymentFilter(req)).sort({ createdAt: -1 }).limit(5000));
-  sendCsv(res, 'flutterwave-payments.csv', ['Date', 'Reference', 'Customer', 'Email', 'Type', 'For', 'Amount', 'Status', 'Order result'],
-    rows.map((p) => [new Date(p.createdAt).toISOString(), p.reference, p.userName, p.userEmail, p.kind === 'order' ? 'Order payment' : 'Wallet top-up', p.forOrder, p.amount, p.status, p.orderState]));
+router.get('/flutterwave/transactions.csv', async (req, res) => {
+  const r = await loadFlwRows(req);
+  if (r.mock || r.error) return res.status(400).json({ error: r.error || 'Not connected to Flutterwave (mock mode).' });
+  const rows = await withWebsiteState(r.rows);
+  sendCsv(res, 'flutterwave-transactions.csv', ['Date', 'Reference (tx_ref)', 'Flutterwave ref', 'Customer', 'Email', 'Method', 'Amount', 'Fee', 'Status', 'On website'],
+    rows.map((t) => [t.createdAt, t.txRef, t.flwRef, t.customerName, t.customerEmail, t.typeLabel, t.amount, t.fee, t.status, t.website === 'credited' ? 'credited' : t.website === 'not-credited' ? 'NOT credited' : 'not from this website']));
 });
 
-// Ask Flutterwave again about one payment. If it was really paid, the customer is credited (once) and told.
+// Ask Flutterwave again about one payment made through the website. If it was truly paid, the customer is credited (once) and told.
 router.post('/payments/:reference/recheck', async (req, res) => {
   const f = await Funding.findOne({ reference: req.params.reference });
-  if (!f) return res.status(404).json({ error: 'Payment not found.' });
+  if (!f) return res.status(404).json({ error: 'This payment was not made through the website, so there is nothing to credit.' });
   const before = f.status;
   const r = await settleFunding(f.reference);
   logEvent({ category: 'admin', action: 'payment.recheck', message: `Re-checked payment ${f.reference}: ${r.state}`, actor: actorOf(req), user: { id: f.userId }, meta: { before, after: r.state } });

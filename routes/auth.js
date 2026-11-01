@@ -1,11 +1,12 @@
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const User = require('../models/User');
 const { publicUser, createToken, hashToken } = require('../utils/helpers');
 const { requireAuth } = require('../middleware/auth');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
+const { sendOtpEmail, sendPasswordResetEmail } = require('../services/email');
 const { logEvent } = require('../utils/log');
 const { notifyLogin, notifyFailedLogins, notifyPasswordChanged, notifyWelcome, alertAdmin } = require('../services/notify');
 
@@ -52,16 +53,22 @@ function cooledDown(sentAt) {
   return !sentAt || Date.now() - new Date(sentAt).getTime() >= RESEND_COOLDOWN_MS;
 }
 
-async function issueVerification(user) {
-  const { raw, hash } = createToken();
-  user.verifyTokenHash = hash;
-  user.verifyTokenExpires = new Date(Date.now() + VERIFY_TTL_MS);
-  user.verifyEmailSentAt = new Date();
+// ---- Sign-up code (OTP): 6 digits, valid 10 minutes, 5 wrong tries, then a new code is needed ----
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const otpHash = (userId, code) => crypto.createHmac('sha256', process.env.JWT_SECRET || 'dev-secret').update(`${userId}:${code}`).digest('hex');
+
+async function issueOtp(user) {
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  user.otpHash = otpHash(user.id, code);
+  user.otpExpires = new Date(Date.now() + OTP_TTL_MS);
+  user.otpAttempts = 0;
+  user.otpSentAt = new Date();
   await user.save();
-  return sendVerificationEmail(user, raw);
+  return sendOtpEmail(user, code);
 }
 
-// ---- Register: creates the account, emails a verification link. No session yet. ----
+// ---- Register: creates the account and emails a 6-digit code. No session until the code is entered. ----
 router.post('/register', async (req, res) => {
   const { fullName, email, phone, password } = req.body;
 
@@ -78,7 +85,7 @@ router.post('/register', async (req, res) => {
   if (existing) {
     if (isUnverified(existing)) {
       return res.status(409).json({
-        error: 'This email is already registered but not verified yet. Check your inbox, or request a new verification link.',
+        error: 'This email is already registered but not verified yet. Enter the code we email you, or request a new one.',
         code: 'EMAIL_NOT_VERIFIED',
         email: cleanEmail
       });
@@ -101,16 +108,17 @@ router.post('/register', async (req, res) => {
     emailVerified: false
   });
 
-  const sent = await issueVerification(user);
+  const sent = await issueOtp(user);
   logEvent({ category: 'auth', action: 'register', message: `New account: ${user.email}`, user: { id: user.id, email: user.email }, req, meta: { emailSent: !!sent.ok } });
   if (!sent.ok) logEvent({ category: 'system', level: 'error', action: 'email.failed', message: `Verification email could not be sent to ${user.email}`, user: { id: user.id, email: user.email } });
 
   res.status(201).json({
     message: sent.ok
-      ? 'Account created. We sent a verification link to your email.'
-      : 'Account created, but we could not send the verification email. Use "Resend" on the next screen.',
+      ? 'Account created. We sent a 6-digit code to your email.'
+      : 'Account created, but we could not send the code. Tap "Resend code" on the next screen.',
     email: user.email,
-    emailSent: !!sent.ok
+    emailSent: !!sent.ok,
+    otp: true
   });
 });
 
@@ -146,7 +154,55 @@ router.post('/verify-email', async (req, res) => {
   res.json({ message: 'Email verified. You can now log in.' });
 });
 
-// ---- Resend verification link ----
+// ---- Enter the code: verifies the email AND signs the customer in, in the same window ----
+router.post('/verify-otp', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const code = String(req.body.code || '').replace(/\D/g, '');
+  if (!email || code.length !== 6) {
+    return res.status(400).json({ error: 'Enter the 6-digit code from your email.', code: 'OTP_INVALID' });
+  }
+
+  const wrong = () => res.status(400).json({ error: 'That code is not correct, or it has expired. Check it or request a new one.', code: 'OTP_INVALID' });
+  const user = await User.findOne({ email });
+  if (!user || !isUnverified(user) || !user.otpHash) return wrong();
+  if (user.suspended) return res.status(403).json({ error: 'This account has been suspended. Please contact support.', code: 'ACCOUNT_SUSPENDED' });
+  if (!user.otpExpires || user.otpExpires.getTime() < Date.now()) {
+    return res.status(400).json({ error: 'This code has expired. Request a new one.', code: 'OTP_EXPIRED' });
+  }
+
+  // Every guess uses up one of the 5 tries BEFORE it is checked, so rapid parallel guesses cannot beat the limit.
+  const tried = await User.findOneAndUpdate({ id: user.id, otpAttempts: { $lt: OTP_MAX_ATTEMPTS } }, { $inc: { otpAttempts: 1 } }, { new: true });
+  if (!tried) {
+    return res.status(429).json({ error: 'Too many wrong attempts. Request a new code.', code: 'OTP_LOCKED' });
+  }
+
+  const expected = Buffer.from(user.otpHash);
+  const given = Buffer.from(otpHash(user.id, code));
+  const ok = expected.length === given.length && crypto.timingSafeEqual(expected, given);
+  if (!ok) {
+    const left = OTP_MAX_ATTEMPTS - tried.otpAttempts;
+    logEvent({ category: 'auth', level: 'warn', action: 'otp.wrong', message: `Wrong sign-up code for ${user.email}`, user: { id: user.id, email: user.email }, req });
+    return res.status(400).json({
+      error: left > 0 ? `Incorrect code. ${left} ${left === 1 ? 'try' : 'tries'} left.` : 'Too many wrong attempts. Request a new code.',
+      code: left > 0 ? 'OTP_INVALID' : 'OTP_LOCKED'
+    });
+  }
+
+  tried.emailVerified = true;
+  tried.otpHash = null;
+  tried.otpExpires = null;
+  tried.otpAttempts = 0;
+  tried.verifyTokenHash = null;
+  tried.verifyTokenExpires = null;
+  tried.lastLoginAt = new Date();
+  await tried.save();
+  logEvent({ category: 'auth', action: 'email.verified', message: `Email verified with a code: ${tried.email}`, user: { id: tried.id, email: tried.email }, req });
+  notifyWelcome(tried);
+
+  res.json({ message: 'Email verified. Welcome!', token: signToken(tried), user: publicUser(tried) });
+});
+
+// ---- Resend the sign-up code ----
 // Always answers the same way so it can't be used to discover which emails exist.
 router.post('/resend-verification', async (req, res) => {
   const { email } = req.body;
@@ -156,13 +212,13 @@ router.post('/resend-verification', async (req, res) => {
 
   const user = await User.findOne({ email: String(email).trim().toLowerCase() });
   if (user && isUnverified(user)) {
-    if (!cooledDown(user.verifyEmailSentAt)) {
-      return res.status(429).json({ error: 'Please wait a minute before requesting another email.' });
+    if (!cooledDown(user.otpSentAt)) {
+      return res.status(429).json({ error: 'Please wait a minute before requesting another code.' });
     }
-    await issueVerification(user);
+    await issueOtp(user);
   }
 
-  res.json({ message: 'If that account exists and is not yet verified, a new verification link is on its way.' });
+  res.json({ message: 'If that account exists and is not yet verified, a new code is on its way.' });
 });
 
 // ---- Login: blocked until the email is verified ----

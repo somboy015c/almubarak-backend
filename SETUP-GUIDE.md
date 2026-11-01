@@ -178,7 +178,7 @@ Every email uses the same Elmubarak branding (logo, green and gold, clear detail
 
 **Customers get an email when:** an order succeeds, fails or is still processing (airtime, data, electricity with the token, cable, exam PIN), a payment or wallet top-up
 is received or fails, a withdrawal is requested/paid/fails, money is sent or received, an airtime-to-cash request is received/approved/rejected, an admin changes their wallet or
-suspends/reactivates their account, they verify their email (welcome), **every time they log in** (time, device, IP and a "this wasn't me" button), their password changes,
+suspends/reactivates their account, they verify their email with the 6-digit sign-up code (then a welcome email), **every time they log in** (time, device, IP and a "this wasn't me" button), their password changes,
 or there are repeated failed login attempts on their account.
 
 **Admins get an email when:** the provider refuses the server (IP lock) or the API key, the provider wallet is low (checked every 20 minutes), 5+ orders fail within 10 minutes,
@@ -204,7 +204,7 @@ Open **Admin panel** from the sidebar (admins only).
 | **Transactions** | Search by reference, customer name, email or phone. Filter by type, status and dates. Click a row for full details (provider charge, profit, token). Export to CSV. **Mark paid / Refund** for orders stuck on processing |
 | **Users** | Search customers, see their orders and spending, **adjust wallet**, **suspend / reactivate**, make or remove admins |
 | **Services & plans** | Turn off whole services (airtime, data, electricity, cable, exam PINs, funding, transfers, withdrawals, airtime-to-cash), individual networks, plan types (e.g. MTN > Gifting), single data plans, electricity companies, cable providers and packages. **Maintenance mode** and a **notice banner** for all customers. Anything switched off disappears from the customer's dashboard within a minute |
-| **Flutterwave payments** | Every payment customers made through Flutterwave, with totals (successful, average, pending, failed, success rate, today / 7 / 30 days), filters, search, CSV export, and a **Re-check** button that asks Flutterwave again and credits the customer once if it was really paid |
+| **Flutterwave transactions** | Reads Flutterwave's OWN transaction list live (same as their dashboard), for the dates you choose. All statistics (total successful, average, fees, failed, pending, success rate, by method) are calculated from those Flutterwave transactions. Also shows your Flutterwave balance, and an **On website** column (Credited / Not credited yet / Not from this website) with a **Credit now** button for payments Flutterwave received but the website has not credited. Search, filters, CSV export |
 | **Airtime to cash setup** | The number customers send airtime to, per network (empty = that network is not offered), and the payout rate. Customer flow: choose line, amount, see payout, Proceed, see your number, send, tick "I have sent the airtime", place request; you are emailed with the details |
 | **Pricing & markup** | Your markups, plus collapsible price lists (airtime, data per network, cable per provider, electricity, exam PINs) showing supplier IDs, supplier price, your website price and profit |
 | **Withdrawals** | Customers request a withdrawal and the money is held from their wallet. You see the bank details (with a Copy button), send the money yourself, then click **Mark paid** (add your payment reference) or **Reject** (refunds the wallet). **Start processing** is optional and tells the customer it is on its way. Customer and admins are emailed at every step, and the customer sees the status under Withdraw |
@@ -229,8 +229,8 @@ payment is credited to their wallet and the order runs straight away. If the ord
 - [ ] Admin -> System check: everything green (in mock mode some items are expected to show as missing).
 - [ ] Admin -> Services & plans: switch MTN data plan type off, confirm it disappears from the customer's data page, switch it back on.
 - [ ] At checkout with a small balance the Wallet option is greyed out and Flutterwave is selected.
-- [ ] Register -> "Check your email" screen -> (email link is in the Render log in mock/no-key mode) -> verify -> log in.
-- [ ] Log in before verifying -> blocked with a "Resend link" option.
+- [ ] Register -> the sign-up window shows six boxes -> type the 6-digit code from the email (or paste it) -> you are signed in on the same page and taken to the dashboard. (In mock/no-key mode the code is printed in the server log.) Wrong code shows how many tries are left; after 5 wrong tries ask for a new code.
+- [ ] Log in before verifying -> the same six-box window opens and a fresh code is sent.
 - [ ] "Forgot password?" -> reset link -> new password -> log in. Eye icons work on every password field.
 - [ ] Fund wallet, buy airtime/data/electricity/cable/exam. Receipt appears each time.
 - [ ] Phone `00000000000` simulates a failure (wallet refunded); `11111111111` simulates a slow "processing" order.
@@ -250,6 +250,7 @@ payment is credited to their wallet and the order runs straight away. If the ord
 
 | Symptom | Likely cause / fix |
 |---|---|
+| Sign-up code never arrives | Same as the next line (Resend domain / key). The customer can tap **Resend code** after 60 seconds. Codes last 10 minutes and allow 5 tries |
 | Emails never arrive | Resend domain not **Verified** yet; wrong `RESEND_API_KEY`; check Render logs for "Resend error"; check spam |
 | Verification link goes to wrong site, or System check shows "Website address" in red | `FRONTEND_URL` holds more than one address. Set it to exactly `https://elmubarak.com.ng` (one address, no comma, no spaces, no trailing slash). Several addresses belong only in `CLIENT_ORIGIN` |
 | Customers are logged out by themselves | By design: everyone is logged out after 15 minutes without clicking, typing or scrolling (a warning shows in the last minute) |
@@ -275,3 +276,24 @@ payment is credited to their wallet and the order runs straight away. If the ord
 
 ## Notes on PINs and tokens
 Electricity tokens and exam PINs are stored with the transaction, so customers can always find them again under **History** (filter *PINs & tokens*, then *View PIN / token*). Admins can see them in Transactions details, so treat them as private.
+
+
+---
+
+## Part 9: Going live: clear all test data
+
+Do this ONCE, before real customers use the website. It removes every test transaction, order, payment record, withdrawal, airtime-to-cash request, notice and activity-log entry, and sets wallet balances back to zero. It keeps admin accounts, pricing, service switches and the airtime-to-cash numbers. **It cannot be undone**, so it saves a backup file first.
+
+Run it from your own computer (Render's free plan has no shell):
+
+1. Install Node.js, open a terminal in the backend folder (`almubarak-backend-main`) and run `npm install`.
+2. Create a file called `.env` in that folder containing one line: `MONGODB_URI=` followed by the same connection string your Render server uses. (MongoDB Atlas > Network Access must allow your computer, or `0.0.0.0/0`.)
+3. **Dry run** (changes nothing, shows what would be removed and how much money customers currently hold):
+   `node scripts/reset-for-launch.js`
+4. If everything on the list is test data, run it for real:
+   `node scripts/reset-for-launch.js --confirm=RESET`
+   Add `--delete-customers` to also delete every non-admin account (your test customers). Add `--keep-logs` to keep the activity log.
+5. A backup is written to the `backups` folder. Keep it private and delete it later.
+6. In the admin panel, open Overview and Transactions to confirm they are empty. Switch to live keys, then make one small real purchase.
+
+Before you run step 4, make sure no real customer money is in the wallets. The dry run prints the total in customer wallets.

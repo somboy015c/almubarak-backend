@@ -17,6 +17,7 @@ function publicUser(user) {
   const {
     password, transactionPin, _id, __v,
     verifyTokenHash, verifyTokenExpires, verifyEmailSentAt,
+    otpHash, otpExpires, otpAttempts, otpSentAt,
     resetTokenHash, resetTokenExpires, resetEmailSentAt,
     ...rest
   } = plain;

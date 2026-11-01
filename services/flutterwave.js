@@ -168,4 +168,92 @@ async function initiateTransfer({ amount, bankCode, accountNumber, accountName, 
   }
 }
 
-module.exports = { initializeFunding, verifyFunding, listBanks, resolveAccount, initiateTransfer };
+
+// ---- Flutterwave's own transaction list (what you see on their dashboard) ----
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const listCache = new Map(); // short cache so the admin page is quick and we do not hammer Flutterwave
+
+function normaliseTx(t) {
+  const c = t.customer || {};
+  return {
+    id: t.id,
+    txRef: t.tx_ref || '',
+    flwRef: t.flw_ref || '',
+    amount: Number(t.amount) || 0,
+    charged: Number(t.charged_amount ?? t.amount) || 0,
+    fee: Number(t.app_fee) || 0,
+    currency: t.currency || 'NGN',
+    status: String(t.status || '').toLowerCase(),
+    paymentType: String(t.payment_type || '').toLowerCase(),
+    createdAt: t.created_at,
+    customerName: c.name || t.customer_name || '',
+    customerEmail: c.email || t.customer_email || '',
+    customerPhone: c.phone_number || '',
+    narration: t.narration || '',
+    processorResponse: t.processor_response || ''
+  };
+}
+
+async function listPage(params, attempt = 0) {
+  try {
+    const { data } = await client().get('/transactions', { params });
+    return data;
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 429 && attempt < 3) { await sleep(1200 * (attempt + 1)); return listPage(params, attempt + 1); }
+    logError('list transactions', err);
+    if (status === 401 || status === 403) throw new Error('Flutterwave rejected the secret key. Check FLW_SECRET_KEY on the server.');
+    throw new Error('Could not read the transactions from Flutterwave right now. Please try again in a moment.');
+  }
+}
+
+// Every transaction in the date range (all pages), with Flutterwave doing the status/email filtering.
+// filters: { from, to, status, email }  (dates as YYYY-MM-DD)
+async function fetchAllTransactions(filters, { fresh = false, maxPages = 200 } = {}) {
+  const key = JSON.stringify(filters);
+  const hit = listCache.get(key);
+  if (!fresh && hit && Date.now() - hit.at < 90 * 1000) return hit.data;
+
+  const base = { from: filters.from, to: filters.to, currency: 'NGN' };
+  if (filters.status) base.status = filters.status;
+  if (filters.email) base.customer_email = filters.email;
+
+  const first = await listPage({ ...base, page: 1 });
+  const info = (first && first.meta && first.meta.page_info) || {};
+  const totalPages = Number(info.total_pages) || 1;
+  const rows = (first.data || []).map(normaliseTx);
+
+  const last = Math.min(totalPages, maxPages);
+  for (let start = 2; start <= last; start += 5) {
+    const batch = [];
+    for (let p = start; p < start + 5 && p <= last; p++) batch.push(listPage({ ...base, page: p }));
+    (await Promise.all(batch)).forEach((r) => (r.data || []).forEach((t) => rows.push(normaliseTx(t))));
+  }
+
+  const data = {
+    rows,
+    totalAtFlutterwave: Number(info.total) || rows.length,
+    truncated: totalPages > maxPages,
+    fieldsSeen: Object.keys((first.data && first.data[0]) || {}),
+    fetchedAt: new Date().toISOString()
+  };
+  listCache.set(key, { at: Date.now(), data });
+  if (listCache.size > 40) listCache.delete(listCache.keys().next().value);
+  return data;
+}
+
+// Your Flutterwave balance (Naira)
+async function getNgnBalance() {
+  try {
+    const { data } = await client().get('/balances/NGN');
+    const d = Array.isArray(data?.data) ? data.data[0] : data?.data;
+    if (!d) return null;
+    return { available: Number(d.available_balance), ledger: Number(d.ledger_balance) };
+  } catch (err) {
+    logError('balance', err);
+    return null;
+  }
+}
+
+module.exports = { initializeFunding, verifyFunding, listBanks, resolveAccount, initiateTransfer, fetchAllTransactions, getNgnBalance };

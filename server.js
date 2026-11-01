@@ -50,6 +50,9 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
 // Stricter cap on endpoints that send email, to stop inbox spamming / Resend quota abuse
 const emailLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 8, message: { error: 'Too many requests. Please try again in a few minutes.' } });
 app.use(['/api/auth/forgot-password', '/api/auth/resend-verification'], emailLimiter);
+// Guessing a 6-digit code: tight limit per IP on top of the 5-tries-per-code rule
+const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 25, message: { error: 'Too many attempts. Please try again in a few minutes.' } });
+app.use('/api/auth/verify-otp', otpLimiter);
 app.use('/api/auth', authLimiter, authRoutes);
 
 app.use('/api/webhooks', webhookRoutes);
