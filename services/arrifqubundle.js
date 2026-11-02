@@ -127,7 +127,7 @@ async function cached(key, loader, ttlMs = 5 * 60 * 1000, force = false) {
 }
 
 // /api/user/: account details + Dataplans + Cableplan
-const getUser = (force = false) => cached('user', async () => (await client().get('/user/')).data, 5 * 60 * 1000, force);
+const getUser = (force = false) => cached('user', async () => (await client().get('/user/')).data, 2 * 60 * 1000, force);
 
 // /api/v1/base/: public catalogue of networks, cable, discos and exam PINs
 async function getBase(force = false) {
@@ -143,6 +143,30 @@ async function getBase(force = false) {
 }
 
 const userType = (user) => user?.user?.user_type || user?.user_type || null;
+
+// Which price field to trust on a plan: the one named for this account type ("API_price", "TopUser_price", any capitalisation),
+// otherwise "plan_amount" (the provider's price for the logged-in account). Remembered so the admin can see which was used.
+let lastPriceBasis = { accountType: null, field: 'plan_amount' };
+function priceFieldFor(plan, type) {
+  if (type) {
+    const wanted = `${type}_price`.toLowerCase();
+    const key = Object.keys(plan).find((k) => k.toLowerCase() === wanted && Number.isFinite(num(plan[k])));
+    if (key) return key;
+  }
+  return 'plan_amount';
+}
+
+// Forget everything we remembered and read the provider's lists again (used by the admin "Refresh prices" button).
+async function refreshCatalogue() {
+  Object.keys(cache).forEach((k) => delete cache[k]);
+  if (!isLive()) return { ok: true, mock: true, accountType: 'mock', plans: Object.values(MOCK.data).reduce((t, l) => t + l.length, 0) };
+  const user = await getUser(true);
+  await getBase(true);
+  const type = userType(user);
+  let plans = 0;
+  for (const n of Object.keys(NETWORK_KEY)) plans += (await getVariations('data', n)).length;
+  return { ok: true, accountType: type || null, plans, priceField: lastPriceBasis.field, balance: num(user?.user?.Account_Balance) };
+}
 
 // ---- IDs (from the catalogue only) ----
 const NETWORK_KEY = { mtn: 'MTN', glo: 'GLO', airtel: 'AIRTEL', '9mobile': '9MOBILE' };
@@ -205,8 +229,10 @@ async function getVariations(kind, providerName) {
 
   try {
     if (kind === 'exam') {
-      const base = await getBase();
-      return (base?.exam || [])
+      const user = await getUser().catch(() => null);
+      const own = user?.Exam && typeof user.Exam === 'object' ? Object.entries(user.Exam).map(([name, v]) => ({ exam_name: name, amount: v && v.amount })) : [];
+      const base = own.length ? null : await getBase();
+      return (own.length ? own : base?.exam || [])
         .filter((e) => e && e.exam_name && num(e.amount) > 0)
         .map((e) => ({ serviceID: String(e.exam_name), variation_code: String(e.exam_name), name: `${e.exam_name} Result Checker PIN`, amount: num(e.amount) }));
     }
@@ -227,7 +253,9 @@ async function getVariations(kind, providerName) {
         seen.add(p.id);
         const validity = String(p.month_validate ?? '').trim();
         if (/not\s*available/i.test(validity)) continue; // the provider itself marks these as unavailable
-        const price = num((type && p[`${type}_price`]) ?? p.plan_amount);
+        const priceField = priceFieldFor(p, type);
+        lastPriceBasis = { accountType: type || null, field: priceField };
+        const price = num(p[priceField]);
         if (!Number.isFinite(price) || price <= 0) continue;
         const size = tidySize(p.plan);
         plans.push({
@@ -245,15 +273,18 @@ async function getVariations(kind, providerName) {
     if (kind === 'cable') {
       const c = await cableEntry(providerName);
       if (!c) return [];
-      let list = c.entry?.cableplan;
-      if (!Array.isArray(list)) {
-        const user = await getUser();
-        list = user?.Cableplan?.[`${CABLE_KEY[String(providerName).toLowerCase()]}PLAN`] || [];
-      }
+      const key = `${CABLE_KEY[String(providerName).toLowerCase()]}PLAN`;
+      const user = await getUser();
+      const type = userType(user);
+      // The account's own list first (its prices follow the account type), then the public catalogue.
+      let list = user?.Cableplan?.[key];
+      if (!Array.isArray(list) || !list.length) list = c.entry?.cableplan;
+      if (!Array.isArray(list)) list = [];
       return list
-        .filter((p) => p && p.id !== undefined && num(p.plan_amount) > 0)
-        .map((p) => ({ variation_code: String(p.id), name: String(p.package).trim(), amount: round2(num(p.plan_amount)) }))
-        .sort((a, b) => a.amount - b.amount);
+        .filter((p) => p && p.id !== undefined)
+        .map((p) => ({ variation_code: String(p.id), name: String(p.package).trim(), amount: round2(num(p[priceFieldFor(p, type)])) }))
+        .filter((p) => Number.isFinite(p.amount) && p.amount > 0)
+        .sort((a, b2) => a.amount - b2.amount);
     }
   } catch (err) {
     console.error('Arrifqubundle catalog error:', err.response?.status, errorText(err.response?.data) || err.message);
@@ -535,6 +566,8 @@ async function diagnostics() {
       sampleDataPlans: (await getVariations('data', 'mtn')).slice(0, 3),
       sampleCablePlans: (await getVariations('cable', 'dstv')).slice(0, 3),
       detectedBalance: num(user?.user?.Account_Balance),
+      priceBasis: lastPriceBasis,
+      samplePlanPriceFields: (() => { const g = user?.Dataplans?.MTN_PLAN; const p = g && (g.ALL?.[0] || Object.values(g).flat()[0]); return p ? Object.fromEntries(Object.entries(p).filter(([k]) => /price|amount/i.test(k))) : null; })(),
       userResponse: summarise(user),
       catalogueResponse: summarise(base)
     };
@@ -543,4 +576,9 @@ async function diagnostics() {
   }
 }
 
-module.exports = { getVariations, getDiscos, getNetworks, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK };
+async function priceBasis() {
+  if (isLive()) await getVariations('data', 'mtn'); // makes sure the basis reflects the current list
+  return lastPriceBasis;
+}
+
+module.exports = { priceBasis, refreshCatalogue, getVariations, getDiscos, getNetworks, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK };

@@ -206,6 +206,7 @@ Open **Admin panel** from the sidebar (admins only).
 | **Services & plans** | Turn off whole services (airtime, data, electricity, cable, exam PINs, funding, transfers, withdrawals, airtime-to-cash), individual networks, plan types (e.g. MTN > Gifting), single data plans, electricity companies, cable providers and packages. **Maintenance mode** and a **notice banner** for all customers. Anything switched off disappears from the customer's dashboard within a minute |
 | **Flutterwave transactions** | Reads Flutterwave's OWN transaction list live (same as their dashboard), for the dates you choose. All statistics (total successful, average, fees, failed, pending, success rate, by method) are calculated from those Flutterwave transactions. Also shows your Flutterwave balance, and an **On website** column (Credited / Not credited yet / Not from this website) with a **Credit now** button for payments Flutterwave received but the website has not credited. Search, filters, CSV export |
 | **Airtime to cash setup** | The number customers send airtime to, per network (empty = that network is not offered), and the payout rate. Customer flow: choose line, amount, see payout, Proceed, see your number, send, tick "I have sent the airtime", place request; you are emailed with the details |
+| **Refresh prices** (Overview, and above the price lists) | Makes the website forget the supplier prices it remembered and read them again with your current account type (needed after the supplier moves your account, for example to the API plan). The price lists say which price field is in use |
 | **Pricing & markup** | Your markups, plus collapsible price lists (airtime, data per network, cable per provider, electricity, exam PINs) showing supplier IDs, supplier price, your website price and profit |
 | **Withdrawals** | Customers request a withdrawal and the money is held from their wallet. You see the bank details (with a Copy button), send the money yourself, then click **Mark paid** (add your payment reference) or **Reject** (refunds the wallet). **Start processing** is optional and tells the customer it is on its way. Customer and admins are emailed at every step, and the customer sees the status under Withdraw |
 | **Airtime to cash** | Review each request, confirm the airtime arrived, then **Approve** or **Reject**. The automatic option is OFF (it is not connected to any provider) |
@@ -297,3 +298,12 @@ Run it from your own computer (Render's free plan has no shell):
 6. In the admin panel, open Overview and Transactions to confirm they are empty. Switch to live keys, then make one small real purchase.
 
 Before you run step 4, make sure no real customer money is in the wallets. The dry run prints the total in customer wallets.
+
+
+---
+
+## Notes: supplier prices and account type
+Supplier prices come from the supplier's own lists for **your account** (data plans, cable packages and exam PINs). They are remembered for about 2 minutes. After the supplier changes your account type (for example from TopUser to API) or changes prices, press **Refresh prices** in the admin panel (Overview, or above the price lists in Pricing). The price lists show which price field is being used for your account type. If a price still differs from the supplier's website, open **Provider check** and send the "priceBasis" and "samplePlanPriceFields" parts to your developer.
+
+## Support contact
+The customer support WhatsApp number is **+234 814 727 2610**. It is used by the floating WhatsApp button on the website pages, the WhatsApp icon in the footer, and every email. To change it, replace `2348147272610` in the frontend HTML files and in `services/email.js` (the `WHATSAPP` line).

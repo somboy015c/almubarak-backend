@@ -11,7 +11,7 @@ const BRAND = 'Elmubarak Digital Hub';
 const GREEN = '#146C43';
 const GREEN_DEEP = '#0A4A31';
 const GOLD = '#C9A24B';
-const WHATSAPP = 'https://wa.me/2349045852890';
+const WHATSAPP = 'https://wa.me/2348147272610';
 
 const fromAddress = () => process.env.EMAIL_FROM || `${BRAND} <no-reply@elmubarak.com.ng>`;
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

@@ -146,6 +146,21 @@ router.get('/provider-balance', async (req, res) => {
   });
 });
 
+// Forget remembered prices and read the supplier's current lists again. Use it after the supplier changes your
+// account (for example moving it to the API plan) or changes its prices.
+router.post('/provider/refresh', async (req, res) => {
+  try {
+    const r = await provider.refreshCatalogue();
+    logEvent({ category: 'admin', action: 'provider.refresh', message: `Prices refreshed from the supplier (${r.plans} data plans, account type ${r.accountType})`, actor: actorOf(req), meta: r });
+    res.json({
+      message: r.mock ? 'Mock mode: nothing to refresh.' : `Refreshed. The supplier reports your account type as "${r.accountType || 'unknown'}" and ${r.plans} data plans. Prices are read from "${r.priceField}".`,
+      ...r
+    });
+  } catch (err) {
+    res.status(502).json({ error: 'Could not reach the supplier to refresh. Please try again.' });
+  }
+});
+
 // What the provider actually returns (IDs, plans, balance) with personal data hidden.
 router.get('/provider-check', async (req, res) => {
   res.json(await provider.diagnostics());
@@ -619,6 +634,7 @@ router.get('/pricing/catalog', async (req, res) => {
   const exam = (await provider.getVariations('exam')).map((p) => ({ id: p.variation_code, name: p.name, category: '', supplierPrice: p.amount, price: round2(p.amount + pricing.exam.flatFee) }));
 
   res.json({
+    basis: await provider.priceBasis(),
     markups: { airtime: pricing.airtime.markupPercent, data: pricing.data.markupPercent, electricity: pricing.electricity.markupPercent, cable: pricing.cable.markupPercent, examFlatFee: pricing.exam.flatFee },
     networks: await provider.getNetworks(),
     discos: await provider.getDiscos(),
