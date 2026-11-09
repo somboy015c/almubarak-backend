@@ -208,21 +208,6 @@ async function sendBrandedMany(list) {
 
 // -------------------------------------------------------------------------
 // Account emails (verification + password reset)
-function sendVerificationEmail(user, rawToken) {
-  const link = `${frontendUrl()}/verify-email.html?token=${rawToken}`;
-  const first = (user.fullName || '').split(' ')[0] || 'there';
-  return sendBranded({
-    to: user.email,
-    subject: `Verify your email: ${BRAND}`,
-    tone: 'info',
-    title: `Welcome, ${first}!`,
-    intro: 'Thanks for signing up. Please confirm your email address to activate your account and start using your wallet.',
-    button: { text: 'Verify my email', url: link },
-    showLink: true,
-    notes: ['This link expires in 24 hours. If you did not create this account, you can safely ignore this email.']
-  });
-}
-
 // Sign-up code. The customer types it into the sign-up window, so there is no link.
 function sendOtpEmail(user, code) {
   const first = (user.fullName || '').split(' ')[0] || 'there';
@@ -252,4 +237,4 @@ function sendPasswordResetEmail(user, rawToken) {
   });
 }
 
-module.exports = { sendBranded, sendBrandedMany, sendVerificationEmail, sendOtpEmail, sendPasswordResetEmail, BRAND };
+module.exports = { sendBranded, sendBrandedMany, sendOtpEmail, sendPasswordResetEmail, BRAND };

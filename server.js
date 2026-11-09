@@ -30,12 +30,14 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+// The Android and iOS apps call the API from these fixed addresses.
+const appOrigins = ['https://localhost', 'capacitor://localhost'];
 
 app.use(
   cors({
     origin(origin, callback) {
       // Allow tools like curl/Postman (no origin) and any listed origin.
-      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin) || appOrigins.includes(origin)) {
         return callback(null, true);
       }
       callback(new Error('Not allowed by CORS'));

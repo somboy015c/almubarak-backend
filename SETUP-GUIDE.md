@@ -118,7 +118,7 @@ Until the domain is verified, Resend only delivers to your own account email. Th
    **Treat the token like a password.** Anyone with it can spend your wallet. If it has been pasted into a chat, email or shared document,
    regenerate it on the site first and use the new one.
 3. In Render set `ARRIFQU_API_KEY` to the token and `ARRIFQU_BASE_URL=https://www.arrifqubundle.com/api`.
-4. Set `PROVIDER_MODE=live` and redeploy.
+4. Set `ARRIFQU_USERNAME` and `ARRIFQU_PASSWORD` to your Arrifqubundle website login. Your real supplier prices are read from https://arrifqubundle.com/pricing/ with this login, because the API only reports the Smart user price. Then set `PROVIDER_MODE=live` and redeploy.
 5. **Confirm the integration** (important, do not skip): log in as admin -> **Admin panel** -> **Overview** -> click **Provider check**.
    It prints what Arrifqubundle returns (with secrets hidden). Check:
    - `detectedBalance` equals the balance you see on the Arrifqubundle site.
@@ -237,7 +237,7 @@ payment is credited to their wallet and the order runs straight away. If the ord
 - [ ] Phone `00000000000` simulates a failure (wallet refunded); `11111111111` simulates a slow "processing" order.
 
 **Stage B: real provider + Flutterwave test keys (`PROVIDER_MODE=live`):**
-- [ ] Real verification email arrives from `no-reply@elmubarak.com.ng` (check spam once).
+- [ ] Real 6-digit sign-up code email arrives from `no-reply@elmubarak.com.ng` (check spam once).
 - [ ] Fund wallet with the test card -> redirected back -> balance credited.
 - [ ] Provider check shows the right balance and IDs (Part 5, step 5).
 - [ ] Buy ₦100 airtime and a small data plan; meter/smartcard verification returns the customer name.

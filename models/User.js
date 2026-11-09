@@ -46,6 +46,21 @@ const userSchema = new mongoose.Schema({
     recipientCode: { type: String, default: null }
   },
 
+  // Phones set up for PIN or fingerprint login. Only hashes are stored.
+  quickDevices: {
+    type: [{
+      _id: false,
+      deviceId: String,
+      secretHash: String,
+      bioSecretHash: { type: String, default: null },
+      pinHash: String,
+      attempts: { type: Number, default: 0 },
+      createdAt: { type: Date, default: Date.now },
+      lastUsedAt: { type: Date, default: Date.now }
+    }],
+    default: []
+  },
+
   createdAt: { type: Date, default: Date.now }
 });
 

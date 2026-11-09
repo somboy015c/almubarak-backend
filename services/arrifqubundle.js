@@ -27,6 +27,7 @@
 
 const axios = require('axios');
 const { generateRef, round2 } = require('../utils/helpers');
+const pricingPage = require('./arrifquPricingPage');
 
 const isLive = () => process.env.PROVIDER_MODE === 'live';
 const baseURL = () => (process.env.ARRIFQU_BASE_URL || 'https://www.arrifqubundle.com/api').replace(/\/+$/, '');
@@ -147,6 +148,7 @@ const userType = (user) => user?.user?.user_type || user?.user_type || null;
 // Which price field to trust on a plan: the one named for this account type ("API_price", "TopUser_price", any capitalisation),
 // otherwise "plan_amount" (the provider's price for the logged-in account). Remembered so the admin can see which was used.
 let lastPriceBasis = { accountType: null, field: 'plan_amount' };
+const pageMatches = {}; // network -> { matched, total }: how many plans took their price from the pricing page
 function priceFieldFor(plan, type) {
   if (type) {
     const wanted = `${type}_price`.toLowerCase();
@@ -162,10 +164,12 @@ async function refreshCatalogue() {
   if (!isLive()) return { ok: true, mock: true, accountType: 'mock', plans: Object.values(MOCK.data).reduce((t, l) => t + l.length, 0) };
   const user = await getUser(true);
   await getBase(true);
+  await pricingPage.getPricingPage(true);
   const type = userType(user);
   let plans = 0;
   for (const n of Object.keys(NETWORK_KEY)) plans += (await getVariations('data', n)).length;
-  return { ok: true, accountType: type || null, plans, priceField: lastPriceBasis.field, balance: num(user?.user?.Account_Balance) };
+  const basis = currentBasis();
+  return { ok: true, accountType: type || null, plans, priceField: basis.pricingPage ? `${basis.column} column on the pricing page` : lastPriceBasis.field, pricingPage: basis.pricingPage, pageError: basis.pageError, balance: num(user?.user?.Account_Balance) };
 }
 
 // ---- IDs (from the catalogue only) ----
@@ -232,9 +236,16 @@ async function getVariations(kind, providerName) {
       const user = await getUser().catch(() => null);
       const own = user?.Exam && typeof user.Exam === 'object' ? Object.entries(user.Exam).map(([name, v]) => ({ exam_name: name, amount: v && v.amount })) : [];
       const base = own.length ? null : await getBase();
+      const tier = pricingPage.tierForAccount(userType(user));
+      const page = await pricingPage.getPricingPage().catch(() => null);
+      const realCost = (e) => {
+        const tiers = page?.exam?.[String(e.exam_name).toUpperCase()]?.tiers;
+        const smart = num(e.amount);
+        return tiers && tier && pricingPage.sane(tiers[tier], smart) ? tiers[tier] : smart;
+      };
       return (own.length ? own : base?.exam || [])
         .filter((e) => e && e.exam_name && num(e.amount) > 0)
-        .map((e) => ({ serviceID: String(e.exam_name), variation_code: String(e.exam_name), name: `${e.exam_name} Result Checker PIN`, amount: num(e.amount) }));
+        .map((e) => ({ serviceID: String(e.exam_name), variation_code: String(e.exam_name), name: `${e.exam_name} Result Checker PIN`, amount: realCost(e) }));
     }
 
     if (kind === 'data') {
@@ -244,18 +255,22 @@ async function getVariations(kind, providerName) {
       const group = user?.Dataplans?.[`${key}_PLAN`];
       if (!group) return [];
       const type = userType(user);
+      const tier = pricingPage.tierForAccount(type);
+      const page = await pricingPage.getPricingPage().catch(() => null);
       // "ALL" repeats every plan that is also listed in its own category: read one list, then de-duplicate by id.
       const list = Array.isArray(group.ALL) ? group.ALL : Object.values(group).flat();
       const seen = new Set();
+      const unique = list.filter((p) => p && p.id !== undefined && !seen.has(p.id) && seen.add(p.id));
+      // The pricing page has this account's real price; the API only has the Smart user price.
+      const realCosts = pricingPage.matchPlanCosts(unique, page?.data?.[String(providerName).toLowerCase()], tier);
+      pageMatches[String(providerName).toLowerCase()] = { matched: realCosts.size, total: unique.length };
       const plans = [];
-      for (const p of list) {
-        if (!p || p.id === undefined || seen.has(p.id)) continue;
-        seen.add(p.id);
+      for (const p of unique) {
         const validity = String(p.month_validate ?? '').trim();
         if (/not\s*available/i.test(validity)) continue; // the provider itself marks these as unavailable
         const priceField = priceFieldFor(p, type);
         lastPriceBasis = { accountType: type || null, field: priceField };
-        const price = num(p[priceField]);
+        const price = realCosts.get(String(p.id)) ?? num(p[priceField]);
         if (!Number.isFinite(price) || price <= 0) continue;
         const size = tidySize(p.plan);
         plans.push({
@@ -566,7 +581,7 @@ async function diagnostics() {
       sampleDataPlans: (await getVariations('data', 'mtn')).slice(0, 3),
       sampleCablePlans: (await getVariations('cable', 'dstv')).slice(0, 3),
       detectedBalance: num(user?.user?.Account_Balance),
-      priceBasis: lastPriceBasis,
+      priceBasis: currentBasis(),
       samplePlanPriceFields: (() => { const g = user?.Dataplans?.MTN_PLAN; const p = g && (g.ALL?.[0] || Object.values(g).flat()[0]); return p ? Object.fromEntries(Object.entries(p).filter(([k]) => /price|amount/i.test(k))) : null; })(),
       userResponse: summarise(user),
       catalogueResponse: summarise(base)
@@ -578,7 +593,16 @@ async function diagnostics() {
 
 async function priceBasis() {
   if (isLive()) await getVariations('data', 'mtn'); // makes sure the basis reflects the current list
-  return lastPriceBasis;
+  return currentBasis();
+}
+
+function currentBasis() {
+  const counts = Object.values(pageMatches);
+  const matched = counts.reduce((t, c) => t + c.matched, 0);
+  const total = counts.reduce((t, c) => t + c.total, 0);
+  const status = pricingPage.pageStatus();
+  const tier = pricingPage.tierForAccount(lastPriceBasis.accountType);
+  return { ...lastPriceBasis, pricingPage: matched > 0, column: pricingPage.TIER_LABEL[tier] || null, matched, total, readAt: status.readAt, pageError: status.error };
 }
 
 module.exports = { priceBasis, refreshCatalogue, getVariations, getDiscos, getNetworks, verifyCustomer, purchase, requery, findByRef, getBalance, diagnostics, MOCK };

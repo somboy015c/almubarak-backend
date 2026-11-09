@@ -19,6 +19,7 @@ function publicUser(user) {
     verifyTokenHash, verifyTokenExpires, verifyEmailSentAt,
     otpHash, otpExpires, otpAttempts, otpSentAt,
     resetTokenHash, resetTokenExpires, resetEmailSentAt,
+    quickDevices,
     ...rest
   } = plain;
   rest.hasPin = !!transactionPin;

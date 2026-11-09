@@ -153,7 +153,7 @@ router.post('/provider/refresh', async (req, res) => {
     const r = await provider.refreshCatalogue();
     logEvent({ category: 'admin', action: 'provider.refresh', message: `Prices refreshed from the supplier (${r.plans} data plans, account type ${r.accountType})`, actor: actorOf(req), meta: r });
     res.json({
-      message: r.mock ? 'Mock mode: nothing to refresh.' : `Refreshed. The supplier reports your account type as "${r.accountType || 'unknown'}" and ${r.plans} data plans. Prices are read from "${r.priceField}".`,
+      message: r.mock ? 'Mock mode: nothing to refresh.' : `Refreshed. The supplier reports your account type as "${r.accountType || 'unknown'}" and ${r.plans} data plans. Prices are read from the ${r.priceField}.${r.pageError ? ` Warning: ${r.pageError}` : ''}`,
       ...r
     });
   } catch (err) {

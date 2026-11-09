@@ -35,7 +35,6 @@ function recordFailure(user, req) {
 
 const router = express.Router();
 
-const VERIFY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
 const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute between emails per account
 
@@ -120,38 +119,6 @@ router.post('/register', async (req, res) => {
     emailSent: !!sent.ok,
     otp: true
   });
-});
-
-// ---- Verify email (called by verify-email.html with the token from the link) ----
-router.post('/verify-email', async (req, res) => {
-  const { token } = req.body;
-  if (!token) {
-    return res.status(400).json({ error: 'Verification link is invalid.' });
-  }
-
-  const user = await User.findOne({ verifyTokenHash: hashToken(token) });
-  if (!user) {
-    return res.status(400).json({
-      error: 'This verification link is invalid or has already been used.',
-      code: 'TOKEN_INVALID'
-    });
-  }
-  if (!user.verifyTokenExpires || user.verifyTokenExpires.getTime() < Date.now()) {
-    return res.status(400).json({
-      error: 'This verification link has expired. Please request a new one.',
-      code: 'TOKEN_EXPIRED',
-      email: user.email
-    });
-  }
-
-  user.emailVerified = true;
-  user.verifyTokenHash = null;
-  user.verifyTokenExpires = null;
-  await user.save();
-  logEvent({ category: 'auth', action: 'email.verified', message: `Email verified: ${user.email}`, user: { id: user.id, email: user.email }, req });
-  notifyWelcome(user);
-
-  res.json({ message: 'Email verified. You can now log in.' });
 });
 
 // ---- Enter the code: verifies the email AND signs the customer in, in the same window ----
@@ -249,7 +216,7 @@ router.post('/login', async (req, res) => {
   // Checked only after the password is correct, so this can't be used to probe emails.
   if (isUnverified(user)) {
     return res.status(403).json({
-      error: 'Please verify your email before logging in. Check your inbox for the verification link.',
+      error: 'Please verify your email before logging in. We will send a 6-digit code to your email.',
       code: 'EMAIL_NOT_VERIFIED',
       email: user.email
     });
@@ -308,6 +275,7 @@ router.post('/reset-password', async (req, res) => {
   }
 
   user.password = await bcrypt.hash(password, 10);
+  user.quickDevices = []; // a phone that was lost or shared can't get back in after a reset
   user.resetTokenHash = null;
   user.resetTokenExpires = null;
   // They just proved they own this inbox, so verification is satisfied too.
@@ -319,6 +287,90 @@ router.post('/reset-password', async (req, res) => {
   notifyPasswordChanged(user, req);
 
   res.json({ message: 'Password updated. You can now log in with your new password.' });
+});
+
+// ---- App quick login: a 4-digit PIN or fingerprint on a phone that signed in with the password once ----
+const QUICK_MAX_DEVICES = 5;
+const QUICK_MAX_PIN_TRIES = 5;
+const QUICK_UNUSED_LIMIT_MS = 90 * 24 * 60 * 60 * 1000;
+const randomSecret = () => crypto.randomBytes(32).toString('hex');
+const sameHash = (a, b) => {
+  const x = Buffer.from(String(a || ''));
+  const y = Buffer.from(String(b || ''));
+  return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+const quickRevoked = (res, status = 410) => res.status(status).json({ error: 'PIN login has been turned off on this phone. Please log in with your password.', code: 'DEVICE_REVOKED' });
+
+router.post('/device/enroll', requireAuth, async (req, res) => {
+  const pin = String(req.body.pin || '');
+  if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: 'Your PIN must be exactly 4 digits.' });
+
+  const secret = randomSecret();
+  const bioSecret = req.body.biometric ? randomSecret() : null;
+  const device = {
+    deviceId: uuidv4(),
+    secretHash: hashToken(secret),
+    bioSecretHash: bioSecret ? hashToken(bioSecret) : null,
+    pinHash: await bcrypt.hash(pin, 10)
+  };
+
+  const user = await User.findOne({ id: req.user.id });
+  user.quickDevices = [...user.quickDevices.filter((d) => d.deviceId !== req.body.replaceDeviceId), device].slice(-QUICK_MAX_DEVICES);
+  await user.save();
+  logEvent({ category: 'auth', action: 'quick-login.enabled', message: `PIN login turned on for a phone: ${user.email}`, user: { id: user.id, email: user.email }, req, meta: { biometric: !!bioSecret } });
+  res.status(201).json({ deviceId: device.deviceId, secret, bioSecret });
+});
+
+router.post('/device/remove', requireAuth, async (req, res) => {
+  await User.updateOne({ id: req.user.id }, { $pull: { quickDevices: { deviceId: String(req.body.deviceId || '') } } });
+  res.json({ message: 'PIN login turned off for this phone.' });
+});
+
+router.post('/device/login', async (req, res) => {
+  const deviceId = String(req.body.deviceId || '');
+  if (!deviceId) return quickRevoked(res, 400);
+  const user = await User.findOne({ 'quickDevices.deviceId': deviceId });
+  const device = user && user.quickDevices.find((d) => d.deviceId === deviceId);
+  if (!device || isUnverified(user)) return quickRevoked(res);
+  if (user.suspended) return res.status(403).json({ error: 'This account has been suspended. Please contact support.', code: 'ACCOUNT_SUSPENDED' });
+
+  const forget = () => User.updateOne({ id: user.id }, { $pull: { quickDevices: { deviceId } } });
+  if (Date.now() - new Date(device.lastUsedAt).getTime() > QUICK_UNUSED_LIMIT_MS) {
+    await forget();
+    return quickRevoked(res);
+  }
+
+  const { bioSecret, secret, pin } = req.body;
+  if (bioSecret) {
+    if (!device.bioSecretHash || !sameHash(device.bioSecretHash, hashToken(String(bioSecret)))) return quickRevoked(res, 403);
+  } else {
+    if (!sameHash(device.secretHash, hashToken(String(secret || '')))) return quickRevoked(res, 403);
+    // Each guess uses up a try BEFORE it is checked, so rapid parallel guesses cannot beat the limit.
+    const tried = await User.findOneAndUpdate(
+      { id: user.id, quickDevices: { $elemMatch: { deviceId, attempts: { $lt: QUICK_MAX_PIN_TRIES } } } },
+      { $inc: { 'quickDevices.$.attempts': 1 } },
+      { new: true }
+    );
+    if (!tried) {
+      await forget();
+      return quickRevoked(res);
+    }
+    if (!(await bcrypt.compare(String(pin || ''), device.pinHash))) {
+      const used = tried.quickDevices.find((d) => d.deviceId === deviceId).attempts;
+      const left = QUICK_MAX_PIN_TRIES - used;
+      logEvent({ category: 'auth', level: 'warn', action: 'quick-login.wrong-pin', message: `Wrong app PIN for ${user.email}`, user: { id: user.id, email: user.email }, req });
+      if (left <= 0) {
+        await forget();
+        return quickRevoked(res);
+      }
+      return res.status(400).json({ error: `Incorrect PIN. ${left} ${left === 1 ? 'try' : 'tries'} left.`, code: 'PIN_INVALID' });
+    }
+  }
+
+  const now = new Date();
+  await User.updateOne({ id: user.id, 'quickDevices.deviceId': deviceId }, { $set: { 'quickDevices.$.attempts': 0, 'quickDevices.$.lastUsedAt': now, lastLoginAt: now } });
+  logEvent({ category: 'auth', action: 'quick-login', message: `Unlocked the app: ${user.email}`, user: { id: user.id, email: user.email }, req, meta: { method: bioSecret ? 'fingerprint' : 'pin' } });
+  res.json({ token: signToken(user), user: publicUser(user) });
 });
 
 router.get('/me', requireAuth, (req, res) => {
