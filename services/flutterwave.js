@@ -48,11 +48,27 @@ async function initializeFunding({ email, amount, name, phone }) {
     });
     const link = data?.data?.link;
     if (!link) return { ok: false, message: 'Could not start payment. Please try again.' };
-    return { ok: true, reference, authorization_url: link };
+    return { ok: true, reference, authorization_url: link, inline: inlineCheckout({ reference, amount, email, name, phone }) };
   } catch (err) {
     logError('initialize', err);
     return { ok: false, message: 'Could not start payment. Please try again.' };
   }
+}
+
+// Settings for Flutterwave Inline, which the Android app uses to take the payment
+// inside the app. Only the PUBLIC key is sent; the payment is still confirmed on
+// the server with verifyFunding() before anything is credited.
+function inlineCheckout({ reference, amount, email, name, phone }) {
+  if (!process.env.FLW_PUBLIC_KEY) return null;
+  return {
+    public_key: process.env.FLW_PUBLIC_KEY,
+    tx_ref: reference,
+    amount,
+    currency: 'NGN',
+    payment_options: 'card,banktransfer,ussd',
+    customer: { email, name: name || email, phone_number: phone || undefined },
+    customizations: { title: 'Elmubarak Digital Hub', description: 'Payment', logo: `${frontendUrl()}/assets/icon.png` }
+  };
 }
 
 // Returns { state: 'success' | 'pending' | 'failed' }.

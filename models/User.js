@@ -46,6 +46,9 @@ const userSchema = new mongoose.Schema({
     recipientCode: { type: String, default: null }
   },
 
+  // Set when the customer asks for their account to be deleted (Google Play requirement).
+  deletionRequestedAt: { type: Date, default: null },
+
   // Phones set up for PIN or fingerprint login. Only hashes are stored.
   quickDevices: {
     type: [{

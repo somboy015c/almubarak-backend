@@ -180,7 +180,7 @@ async function startDirectPayment({ user, order }) {
 
   return {
     status: 200,
-    body: { checkout: true, reference: init.reference, authorization_url: init.authorization_url, mock: !!init.mock }
+    body: { checkout: true, reference: init.reference, authorization_url: init.authorization_url, inline: init.inline || null, mock: !!init.mock }
   };
 }
 

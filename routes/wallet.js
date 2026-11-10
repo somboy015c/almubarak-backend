@@ -41,6 +41,7 @@ router.post('/fund/initialize', requireAuth, requireService('funding'), async (r
   res.json({
     reference: result.reference,
     authorization_url: result.authorization_url,
+    inline: result.inline || null,
     mock: !!result.mock
   });
 });

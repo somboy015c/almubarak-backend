@@ -373,6 +373,29 @@ router.post('/device/login', async (req, res) => {
   res.json({ token: signToken(user), user: publicUser(user) });
 });
 
+// ---- Account deletion request (required by Google Play) ----
+// The account is not wiped automatically: an admin settles any wallet balance first,
+// then deletes it. The customer must confirm with their password.
+router.post('/delete-request', requireAuth, async (req, res) => {
+  const user = await User.findOne({ id: req.user.id });
+  if (!(await bcrypt.compare(String(req.body.password || ''), user.password))) {
+    return res.status(400).json({ error: 'Incorrect password.' });
+  }
+  const reason = String(req.body.reason || '').trim().slice(0, 500);
+  user.deletionRequestedAt = new Date();
+  user.quickDevices = [];
+  await user.save();
+
+  logEvent({ category: 'auth', level: 'warn', action: 'account.delete-request', message: `Account deletion requested: ${user.email}`, user: { id: user.id, email: user.email }, req, meta: { reason } });
+  alertAdmin({
+    level: 'warning',
+    title: 'Account deletion requested',
+    message: `${user.fullName || user.email} has asked for their account to be deleted. Settle any wallet balance with them, then delete the account.`,
+    rows: [['Name', user.fullName], ['Email', user.email], ['Phone', user.phone], ['Wallet balance', `NGN ${Number(user.walletBalance || 0).toFixed(2)}`], ['Reason', reason || 'Not given']]
+  });
+  res.json({ message: 'Your request has been sent. Our team will contact you within 7 days to settle any wallet balance and delete your account.' });
+});
+
 router.get('/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
 });
